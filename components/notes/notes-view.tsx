@@ -1,16 +1,15 @@
 "use client"
 
-import { useState, useCallback, useMemo } from "react"
+import { useState, useCallback, useMemo, useEffect } from "react"
 import {
   Plus,
   Search,
   Folder,
   FileText,
-  MoreHorizontal,
+  X,
   ChevronLeft,
   ChevronRight,
-  Settings,
-  Info,
+  Save,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -29,6 +28,8 @@ const emptyDashboard: DashboardData = {
   habits: [],
   files: [],
 }
+
+const NOTES_STORAGE_KEY = "productivity-hub-notes-files-v1"
 
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
@@ -57,17 +58,6 @@ function findNode(nodes: FileNode[], id: string): FileNode | null {
     if (node.id === id) return node
     if (node.children) {
       const found = findNode(node.children, id)
-      if (found) return found
-    }
-  }
-  return null
-}
-
-function findParent(nodes: FileNode[], id: string, parent: FileNode | null = null): FileNode | null {
-  for (const node of nodes) {
-    if (node.id === id) return parent
-    if (node.children) {
-      const found = findParent(node.children, id, node)
       if (found) return found
     }
   }
@@ -110,28 +100,62 @@ function addNodeToParent(nodes: FileNode[], parentId: string | null, newNode: Fi
   })
 }
 
-function moveNode(nodes: FileNode[], nodeId: string, newParentId: string | null): FileNode[] {
-  // First, remove the node from its current location
-  let nodeToMove: FileNode | null = null
-  const withoutNode = removeNode(nodes, nodeId)
-
-  // Find the node to move
-  const findNodeToMove = (n: FileNode[]): FileNode | null => {
-    for (const node of n) {
-      if (node.id === nodeId) return node
-      if (node.children) {
-        const found = findNodeToMove(node.children)
-        if (found) return found
-      }
+function getNodeText(node: FileNode): string {
+  if (!node.content) return ""
+  try {
+    const parsed: unknown = JSON.parse(node.content)
+    const collectText = (value: unknown): string => {
+      if (!value || typeof value !== "object") return ""
+      if (Array.isArray(value)) return value.map(collectText).join(" ")
+      const record = value as Record<string, unknown>
+      return `${typeof record.text === "string" ? record.text : ""} ${collectText(record.content)}`
     }
-    return null
+    return collectText(parsed)
+  } catch {
+    return node.content
   }
-  nodeToMove = findNodeToMove(nodes)
+}
 
-  if (!nodeToMove) return nodes
+function filterFileTree(nodes: FileNode[], query: string): FileNode[] {
+  if (!query) return nodes
+  const normalizedQuery = query.toLocaleLowerCase()
+  return nodes.flatMap((node) => {
+    const children = node.children ? filterFileTree(node.children, query) : undefined
+    const matches =
+      node.name.toLocaleLowerCase().includes(normalizedQuery) ||
+      getNodeText(node).toLocaleLowerCase().includes(normalizedQuery)
+    if (!matches && !children?.length) return []
+    return [{ ...node, children }]
+  })
+}
 
-  // Add to new parent
-  return addNodeToParent(withoutNode, newParentId, { ...nodeToMove, parentId: newParentId })
+function collectNodeIds(node: FileNode): string[] {
+  return [node.id, ...(node.children?.flatMap(collectNodeIds) ?? [])]
+}
+
+function isFileNode(value: unknown): value is FileNode {
+  if (!value || typeof value !== "object") return false
+  const node = value as Record<string, unknown>
+  const validShape =
+    typeof node.id === "string" &&
+    typeof node.name === "string" &&
+    (node.type === "folder" || node.type === "document") &&
+    (typeof node.parentId === "string" || node.parentId === null) &&
+    typeof node.createdAt === "string" &&
+    typeof node.updatedAt === "string" &&
+    (node.content === undefined || typeof node.content === "string") &&
+    (node.children === undefined ||
+      (Array.isArray(node.children) && node.children.every(isFileNode)))
+  if (!validShape) return false
+  if (node.type === "document" && typeof node.content === "string") {
+    try {
+      const content: unknown = JSON.parse(node.content)
+      return Boolean(content && typeof content === "object" && (content as Record<string, unknown>).type === "doc")
+    } catch {
+      return false
+    }
+  }
+  return true
 }
 
 export function NotesView({
@@ -143,17 +167,65 @@ export function NotesView({
 }) {
   const [files, setFiles] = useState<FileNode[]>(initialData.files || [])
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
+  const [openDocumentIds, setOpenDocumentIds] = useState<string[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [showNewFileDialog, setShowNewFileDialog] = useState(false)
   const [newFileName, setNewFileName] = useState("")
   const [newFileType, setNewFileType] = useState<"folder" | "document">("document")
   const [newFileParentId, setNewFileParentId] = useState<string | null>(null)
+  const [searchValue, setSearchValue] = useState("")
+  const [storageReady, setStorageReady] = useState(false)
+  const [storageLoadFailed, setStorageLoadFailed] = useState(false)
+  const [storageError, setStorageError] = useState<string | null>(null)
 
   const selectedFile = useMemo(() => findNode(files, selectedFileId || ""), [files, selectedFileId])
+  const visibleFiles = useMemo(() => filterFileTree(files, searchValue.trim()), [files, searchValue])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        const saved = window.localStorage.getItem(NOTES_STORAGE_KEY)
+        if (saved !== null) {
+          const parsed: unknown = JSON.parse(saved)
+          if (!Array.isArray(parsed) || !parsed.every(isFileNode)) {
+            throw new Error("Saved notes data is not a valid file list.")
+          }
+          setFiles(parsed)
+        }
+      } catch (error) {
+        setStorageLoadFailed(true)
+        setStorageError(
+          error instanceof Error ? error.message : "Could not load saved notes."
+        )
+      } finally {
+        setStorageReady(true)
+      }
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  useEffect(() => {
+    if (!storageReady || storageLoadFailed) return
+    const timer = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(files))
+        onUpdateDashboard?.({ files })
+        setStorageError(null)
+      } catch (error) {
+        setStorageError(
+          error instanceof Error ? error.message : "Could not save notes."
+        )
+      }
+    }, 150)
+    return () => window.clearTimeout(timer)
+  }, [files, onUpdateDashboard, storageLoadFailed, storageReady])
 
   const handleSelectFile = useCallback((file: FileNode) => {
     if (file.type === "document") {
       setSelectedFileId(file.id)
+      setOpenDocumentIds((current) =>
+        current.includes(file.id) ? current : [...current, file.id]
+      )
     } else {
       // For folders, toggle expansion
       setFiles((current) => updateNode(current, file.id, { isExpanded: !file.isExpanded }))
@@ -180,6 +252,7 @@ export function NotesView({
     setFiles((current) => addNodeToParent(current, newFileParentId, newNode))
     if (newFileType === "document") {
       setSelectedFileId(newNode.id)
+      setOpenDocumentIds((current) => [...current, newNode.id])
     }
     setShowNewFileDialog(false)
     setNewFileName("")
@@ -191,10 +264,10 @@ export function NotesView({
 
   const handleDeleteFile = useCallback((file: FileNode) => {
     if (!confirm(`Delete "${file.name}"?`)) return
+    const removedIds = collectNodeIds(file)
     setFiles((current) => removeNode(current, file.id))
-    if (selectedFileId === file.id) {
-      setSelectedFileId(null)
-    }
+    setOpenDocumentIds((current) => current.filter((id) => !removedIds.includes(id)))
+    if (selectedFileId && removedIds.includes(selectedFileId)) setSelectedFileId(null)
   }, [selectedFileId])
 
   const handleContentChange = useCallback((content: string) => {
@@ -202,15 +275,21 @@ export function NotesView({
     setFiles((current) => updateNode(current, selectedFile.id, { content }))
   }, [selectedFile])
 
-  const handleSaveDashboard = useCallback(() => {
-    onUpdateDashboard?.({ files })
-  }, [files, onUpdateDashboard])
+  const handleCloseTab = useCallback((fileId: string) => {
+    const tabIndex = openDocumentIds.indexOf(fileId)
+    const nextTabs = openDocumentIds.filter((id) => id !== fileId)
+    setOpenDocumentIds(nextTabs)
+    if (selectedFileId === fileId) {
+      setSelectedFileId(nextTabs[Math.max(0, tabIndex - 1)] ?? null)
+    }
+  }, [openDocumentIds, selectedFileId])
 
-  // Auto-save on file changes
-  // In a real app, you'd debounce this and save to localStorage or a backend
+  const handleOpenTab = useCallback((fileId: string) => {
+    setSelectedFileId(fileId)
+  }, [])
 
   return (
-    <div className="flex h-[calc(100vh-200px)] flex-col bg-background">
+    <div className="flex h-[calc(100dvh-180px)] min-h-[480px] flex-col overflow-hidden rounded-xl border border-border bg-background">
       {/* Top Bar */}
       <div className="flex items-center justify-between border-b border-border px-4 py-3 bg-card">
         <div className="flex items-center gap-3">
@@ -231,17 +310,26 @@ export function NotesView({
             <Input
               placeholder="Search in notes..."
               className="pl-9 w-64"
+              value={searchValue}
+              onChange={(event) => setSearchValue(event.target.value)}
+              aria-label="Search notes"
             />
           </div>
           <Button variant="outline" size="sm" onClick={() => handleCreateFile(null)}>
             <Plus className="size-3.5 mr-1.5" />
             New Document
           </Button>
-          <Button variant="ghost" size="icon-sm" onClick={handleSaveDashboard} title="Save">
-            <Settings className="size-4" />
-          </Button>
+          <div className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex">
+            <Save className="size-3.5" />
+            {storageError ? "Save failed" : storageReady ? "Saved on this device" : "Loading notes"}
+          </div>
         </div>
       </div>
+      {storageError && (
+        <div role="status" className="border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-sm text-destructive">
+          {storageError}
+        </div>
+      )}
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
@@ -253,7 +341,8 @@ export function NotesView({
           )}
         >
           <FileTree
-            files={files}
+            files={visibleFiles}
+            searchQuery={searchValue.trim()}
             selectedFileId={selectedFileId}
             onSelectFile={handleSelectFile}
             onCreateFile={handleCreateFile}
@@ -267,6 +356,42 @@ export function NotesView({
         <main className="flex-1 flex flex-col overflow-hidden min-w-0">
           {selectedFile && selectedFile.type === "document" ? (
             <>
+              <div role="tablist" aria-label="Open documents" className="flex min-h-10 items-end gap-1 overflow-x-auto border-b border-border bg-muted/30 px-2 pt-1">
+                {openDocumentIds.map((fileId) => {
+                  const file = findNode(files, fileId)
+                  if (!file || file.type !== "document") return null
+                  const active = selectedFileId === fileId
+                  return (
+                    <div
+                      key={file.id}
+                      role="presentation"
+                      className={cn(
+                        "group flex max-w-56 shrink-0 items-center rounded-t-lg border border-b-0 px-2 text-sm",
+                        active ? "border-border bg-card" : "border-transparent text-muted-foreground hover:bg-muted"
+                      )}
+                    >
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={active}
+                        onClick={() => handleOpenTab(file.id)}
+                        className="flex h-9 min-w-0 items-center gap-2"
+                      >
+                        <FileText className="size-3.5 shrink-0" />
+                        <span className="truncate">{file.name}</span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Close ${file.name}`}
+                        onClick={() => handleCloseTab(file.id)}
+                        className="ml-1 rounded p-1 opacity-60 hover:bg-muted hover:opacity-100"
+                      >
+                        <X className="size-3.5" />
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
               {/* Document Header */}
               <div className="border-b border-border bg-card px-4 py-2 flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -278,22 +403,20 @@ export function NotesView({
                     className="bg-transparent border-none focus:outline-none text-lg font-semibold flex-1 pr-4"
                   />
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground">
-                    Last edited: {new Date(selectedFile.updatedAt).toLocaleString()}
-                  </span>
-                  <Button variant="ghost" size="icon-sm" title="Document info">
-                    <Info className="size-4" />
-                  </Button>
-                </div>
+                <span className="hidden text-xs text-muted-foreground sm:block">
+                  Edited {new Date(selectedFile.updatedAt).toLocaleString()}
+                </span>
               </div>
 
               {/* Editor */}
-              <div className="flex-1 flex p-4 overflow-hidden">
+              <div className="flex-1 flex overflow-hidden">
                 <TiptapEditor
+                  key={selectedFile.id}
                   content={selectedFile.content || ""}
                   onChange={handleContentChange}
                   placeholder="Start writing your document..."
+                  onNewDocument={() => handleCreateFile(null)}
+                  title={selectedFile.name}
                 />
               </div>
             </>

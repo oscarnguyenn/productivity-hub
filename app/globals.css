@@ -128,3 +128,53 @@
     @apply font-sans;
   }
 }
+
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+
+  .note-document-print,
+  .note-document-print * {
+    visibility: visible !important;
+  }
+
+  .note-document-print {
+    position: absolute !important;
+    inset: 0 auto auto 0 !important;
+    display: block !important;
+    width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
+    border: 0 !important;
+    background: white !important;
+  }
+
+  .note-editor-menu,
+  .note-editor-toolbar,
+  .note-editor-scroll > div:first-child {
+    display: none !important;
+  }
+
+  .note-editor-scroll {
+    overflow: visible !important;
+    padding: 0 !important;
+  }
+
+  .print-document-title {
+    display: block !important;
+    margin-bottom: 2rem;
+    color: black !important;
+    font-size: 24pt;
+  }
+
+  .note-document-print .ProseMirror {
+    min-height: 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    padding: 0 !important;
+    color: black !important;
+    background: white !important;
+    box-shadow: none !important;
+  }
+}
