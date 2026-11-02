@@ -40,9 +40,11 @@ export interface Task {
   id: string
   title: string
   project?: string
+  area?: string
   dueDate: string
   priority: Priority
   status: TaskStatus
+  completedAt?: string
 }
 
 export interface Project {
@@ -59,6 +61,17 @@ export interface Goal {
   horizon: string
   progress: number
   target: string
+  targetValue?: number
+  measureUnit?: string
+  currentValue?: number
+  progressEntries?: GoalProgressEntry[]
+}
+
+export interface GoalProgressEntry {
+  id: string
+  amount: number
+  note: string
+  loggedAt: string
 }
 
 export interface Habit {
@@ -68,6 +81,7 @@ export interface Habit {
   streak: number
   completedToday: boolean
   week: boolean[]
+  completionDates?: string[]
 }
 
 // File system types for Google Drive-like notes

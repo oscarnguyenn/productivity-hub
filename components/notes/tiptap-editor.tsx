@@ -86,6 +86,7 @@ const cellColors = [
   { name: "Violet", value: "#ddd6fe" },
   { name: "Pink", value: "#fbcfe8" },
 ]
+const MAX_TABLE_CELLS = 2500
 
 function withCellBackground(extension: typeof TableCell | typeof TableHeader) {
   return extension.extend({
@@ -203,6 +204,7 @@ export function TiptapEditor({
   const [selectedFontSize, setSelectedFontSize] = useState("12")
   const [toolbarRevision, setToolbarRevision] = useState(0)
   const [showTableDialog, setShowTableDialog] = useState(false)
+  const [tableSizeError, setTableSizeError] = useState<string | null>(null)
   const [tableRows, setTableRows] = useState("3")
   const [tableColumns, setTableColumns] = useState("3")
   const [showHighlightPalette, setShowHighlightPalette] = useState(false)
@@ -222,7 +224,7 @@ export function TiptapEditor({
       Image.configure({
         HTMLAttributes: { class: "max-w-full rounded-lg" },
       }),
-      Table.configure({ resizable: true }),
+      Table.configure({ resizable: true, cellMinWidth: 96, handleWidth: 8 }),
       TableRow,
       withCellBackground(TableCell),
       withCellBackground(TableHeader),
@@ -296,6 +298,7 @@ export function TiptapEditor({
   }, [editor])
 
   const openTableDialog = useCallback(() => {
+    setTableSizeError(null)
     setShowTableDialog(true)
     setActiveMenu(null)
   }, [])
@@ -303,9 +306,20 @@ export function TiptapEditor({
   const insertTable = useCallback(() => {
     const rows = Number(tableRows)
     const cols = Number(tableColumns)
-    if (!editor || !Number.isSafeInteger(rows) || !Number.isSafeInteger(cols) || rows < 1 || cols < 1) return
-    editor.chain().focus().insertTable({ rows, cols, withHeaderRow: true }).run()
+    if (!editor || !Number.isSafeInteger(rows) || !Number.isSafeInteger(cols) || rows < 1 || cols < 1) {
+      setTableSizeError("Enter a whole number greater than zero for rows and columns.")
+      return
+    }
+    if (rows * cols > MAX_TABLE_CELLS) {
+      setTableSizeError(`Tables are limited to ${MAX_TABLE_CELLS.toLocaleString()} cells to keep editing responsive.`)
+      return
+    }
+    if (!editor.chain().focus().insertTable({ rows, cols, withHeaderRow: true }).run()) {
+      setTableSizeError("The table could not be inserted at the current cursor position.")
+      return
+    }
     setShowTableDialog(false)
+    setTableSizeError(null)
   }, [editor, tableColumns, tableRows])
 
   const findNextMatch = useCallback(() => {
@@ -447,11 +461,11 @@ export function TiptapEditor({
         : ""
 
   return (
-    <div data-editor-revision={toolbarRevision} className="note-document-print flex min-h-0 flex-1 flex-col overflow-hidden bg-muted/40">
+    <div data-editor-revision={toolbarRevision} className="note-document-print flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-muted/40">
       <h1 className="print-document-title hidden">{title}</h1>
-      <div className="note-editor-menu flex items-center gap-0.5 border-b border-border bg-card px-3 py-1 text-sm">
+      <div className="note-editor-menu flex flex-wrap items-center gap-0.5 border-b border-border bg-card px-3 py-1 text-sm">
         {documentMenus.map((menu) => (
-          <div key={menu} className="relative">
+          <div key={menu} className="relative shrink-0">
             <Button
               type="button"
               variant={activeMenu === menu ? "secondary" : "ghost"}
@@ -863,19 +877,20 @@ export function TiptapEditor({
             <div className="grid grid-cols-2 gap-3">
               <label className="space-y-1.5 text-sm">
                 <span>Rows</span>
-                <Input type="number" min="1" step="1" value={tableRows} onChange={(event) => setTableRows(event.target.value)} />
+                <Input type="number" min="1" max={MAX_TABLE_CELLS} step="1" value={tableRows} onChange={(event) => { setTableRows(event.target.value); setTableSizeError(null) }} />
               </label>
               <label className="space-y-1.5 text-sm">
                 <span>Columns</span>
-                <Input type="number" min="1" step="1" value={tableColumns} onChange={(event) => setTableColumns(event.target.value)} />
+                <Input type="number" min="1" max={MAX_TABLE_CELLS} step="1" value={tableColumns} onChange={(event) => { setTableColumns(event.target.value); setTableSizeError(null) }} />
               </label>
             </div>
-            <p className="mt-2 text-xs text-muted-foreground">{tableRows || "0"} × {tableColumns || "0"} cells</p>
+            <p className="mt-2 text-xs text-muted-foreground">{tableRows || "0"} × {tableColumns || "0"} cells · Maximum {MAX_TABLE_CELLS.toLocaleString()}</p>
+            {tableSizeError && <p role="alert" className="mt-2 text-sm text-destructive">{tableSizeError}</p>}
             <div className="mt-5 flex justify-end gap-2">
               <Button variant="outline" onClick={() => setShowTableDialog(false)}>Cancel</Button>
               <Button
                 onClick={insertTable}
-                disabled={!Number.isSafeInteger(Number(tableRows)) || !Number.isSafeInteger(Number(tableColumns)) || Number(tableRows) < 1 || Number(tableColumns) < 1}
+                disabled={!Number.isSafeInteger(Number(tableRows)) || !Number.isSafeInteger(Number(tableColumns)) || Number(tableRows) < 1 || Number(tableColumns) < 1 || Number(tableRows) * Number(tableColumns) > MAX_TABLE_CELLS}
               >
                 Insert table
               </Button>

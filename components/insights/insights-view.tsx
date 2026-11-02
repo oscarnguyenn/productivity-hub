@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo } from "react"
+import { useMemo, useEffect, useState } from "react"
 import {
   TrendingUp,
   CheckSquare,
@@ -15,7 +15,16 @@ import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { cn } from "@/lib/utils"
 import { formatDueDate } from "@/lib/format"
+import { calculateStreak, isCompletedOnDate, isScheduledOnDate, localDateKey } from "@/lib/habit-utils"
+import { loadUserData } from "@/lib/user-data"
 import type { Task, Habit, Goal, Project } from "@/lib/types"
+
+const INSIGHT_DATA_KEYS = {
+  tasks: "productivity-hub-tasks-v1",
+  habits: "productivity-hub-habits-v1",
+  goals: "productivity-hub-goals-v1",
+  projects: "productivity-hub-projects-v1",
+} as const
 
 interface InsightsData {
   tasks: Task[]
@@ -24,7 +33,74 @@ interface InsightsData {
   projects: Project[]
 }
 
-export function InsightsView({ data }: { data: InsightsData }) {
+function isValidSavedItem(section: string, value: unknown): boolean {
+  if (!value || typeof value !== "object") return false
+  const item = value as Record<string, unknown>
+  if (section === "tasks") {
+    return typeof item.id === "string" &&
+      typeof item.title === "string" &&
+      (item.status === "todo" || item.status === "in-progress" || item.status === "done") &&
+      (item.priority === "high" || item.priority === "medium" || item.priority === "low")
+  }
+  if (section === "habits") {
+    return typeof item.id === "string" &&
+      typeof item.name === "string" &&
+      typeof item.cadence === "string" &&
+      typeof item.streak === "number" &&
+      typeof item.completedToday === "boolean" &&
+      Array.isArray(item.week) &&
+      item.week.length === 7 &&
+      item.week.every((day) => typeof day === "boolean") &&
+      (item.completionDates === undefined || (
+        Array.isArray(item.completionDates) &&
+        item.completionDates.every((date) => typeof date === "string")
+      ))
+  }
+  if (section === "goals") {
+    return typeof item.id === "string" &&
+      typeof item.title === "string" &&
+      typeof item.progress === "number" &&
+      typeof item.horizon === "string" &&
+      typeof item.target === "string"
+  }
+  return typeof item.id === "string" &&
+    typeof item.name === "string" &&
+    (item.status === "active" || item.status === "paused") &&
+    typeof item.progress === "number" &&
+    typeof item.dueDate === "string"
+}
+
+export function InsightsView({ data: initialData }: { data: InsightsData }) {
+  const [data, setData] = useState(initialData)
+  const [storageError, setStorageError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    void Promise.all(Object.entries(INSIGHT_DATA_KEYS).map(async ([section, key]) => [
+      section,
+      await loadUserData<unknown>(key),
+    ] as const)).then((sections) => {
+      const loaded = Object.fromEntries(sections)
+      for (const section of Object.keys(INSIGHT_DATA_KEYS)) {
+        const value = loaded[section]
+        if (value !== null && (!Array.isArray(value) || !value.every((item) => isValidSavedItem(section, item)))) {
+          throw new Error(`Saved ${section} data is not a valid list.`)
+        }
+      }
+      if (active) {
+        setData({
+          tasks: loaded.tasks === null ? initialData.tasks : loaded.tasks as Task[],
+          habits: loaded.habits === null ? initialData.habits : loaded.habits as Habit[],
+          goals: loaded.goals === null ? initialData.goals : loaded.goals as Goal[],
+          projects: loaded.projects === null ? initialData.projects : loaded.projects as Project[],
+        })
+      }
+    }).catch((error: unknown) => {
+      if (active) setStorageError(error instanceof Error ? error.message : "Could not load analytics data.")
+    })
+    return () => { active = false }
+  }, [initialData])
+
   const insights = useMemo(() => calculateInsights(data), [data])
 
   return (
@@ -35,6 +111,12 @@ export function InsightsView({ data }: { data: InsightsData }) {
           Your productivity analytics and trends
         </p>
       </div>
+
+      {storageError && (
+        <p role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          {storageError}
+        </p>
+      )}
 
       {/* Key Metrics */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -86,7 +168,7 @@ export function InsightsView({ data }: { data: InsightsData }) {
       {/* Habits Heatmap & Goals Progress */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <SectionCard title="Habits Heatmap" icon={<Flame className="size-4" />}>
-          <HabitsHeatmap habits={data.habits} />
+          <HabitsHeatmap habits={data.habits} recentDays={insights.weeklyActivity.map(({ day, dateKey }) => ({ day, dateKey }))} />
         </SectionCard>
 
         <SectionCard title="Goals Progress" icon={<Target className="size-4" />}>
@@ -119,9 +201,12 @@ function calculateInsights(data: InsightsData) {
   const completedTasks = tasks.filter((t) => t.status === "done").length
   const totalTasks = tasks.length
   const tasksCompleted = completedTasks
-  const tasksChange = totalTasks > 0 ? `+${completedTasks} this period` : "No data"
+  const tasksChange = totalTasks > 0 ? "All-time completed" : "No tasks"
 
-  const totalStreak = habits.reduce((sum, h) => sum + h.streak, 0)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const totalStreak = habits.reduce((sum, habit) =>
+    sum + calculateStreak(habit.completionDates ?? [], habit.cadence, today), 0)
   const streakChange = habits.length > 0 ? `${habits.length} active habits` : "No habits"
 
   const avgGoalProgress = goals.length > 0
@@ -133,14 +218,23 @@ function calculateInsights(data: InsightsData) {
   const activeProjects = projects.filter((p) => p.status === "active").length
   const projectsChange = `${activeProjects} active`
 
-  // Weekly activity (last 7 days)
+  // Count only task completions with a recorded timestamp and habit logs for each local date.
   const weeklyActivity = Array.from({ length: 7 }, (_, i) => {
-    const date = new Date()
+    const date = new Date(today)
     date.setDate(date.getDate() - (6 - i))
+    const dateKey = localDateKey(date)
     return {
       day: date.toLocaleDateString("en-US", { weekday: "short" }),
-      tasks: Math.floor(Math.random() * 5), // Simulated
-      habits: Math.floor(Math.random() * 4),
+      dateKey,
+      tasks: tasks.filter((task) =>
+        task.status === "done" &&
+        task.completedAt !== undefined &&
+        !Number.isNaN(Date.parse(task.completedAt)) &&
+        localDateKey(new Date(task.completedAt)) === dateKey
+      ).length,
+      habits: habits.filter((habit) =>
+        isScheduledOnDate(habit, date) && isCompletedOnDate(habit, date)
+      ).length,
     }
   })
 
@@ -227,16 +321,16 @@ function SectionCard({
   )
 }
 
-function WeeklyActivityChart({ data }: { data: Array<{ day: string; tasks: number; habits: number }> }) {
+function WeeklyActivityChart({ data }: { data: Array<{ day: string; dateKey: string; tasks: number; habits: number }> }) {
   const maxValue = Math.max(...data.map((d) => d.tasks + d.habits), 1)
 
   return (
     <div className="space-y-3">
       {data.map((d) => (
-        <div key={d.day} className="space-y-1">
+        <div key={d.dateKey} className="space-y-1">
           <div className="flex items-center justify-between text-sm">
             <span className="text-muted-foreground w-10">{d.day}</span>
-            <span className="font-medium">{d.tasks + d.habits} total</span>
+            <span className="font-medium">{d.tasks} tasks · {d.habits} habits</span>
           </div>
           <div className="h-3 bg-muted rounded-full overflow-hidden">
             <div
@@ -273,9 +367,7 @@ function CompletionRateChart({ data }: { data: Array<{ priority: string; complet
   )
 }
 
-function HabitsHeatmap({ habits }: { habits: Habit[] }) {
-  const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-
+function HabitsHeatmap({ habits, recentDays }: { habits: Habit[]; recentDays: Array<{ day: string; dateKey: string }> }) {
   if (habits.length === 0) {
     return (
       <div className="text-center text-muted-foreground py-8">
@@ -291,19 +383,25 @@ function HabitsHeatmap({ habits }: { habits: Habit[] }) {
         <div key={habit.id} className="space-y-1">
           <div className="flex items-center justify-between text-sm">
             <span className="font-medium truncate max-w-[200px]">{habit.name}</span>
-            <span className="text-muted-foreground">{habit.streak} day streak</span>
+            <span className="text-muted-foreground">{calculateStreak(habit.completionDates ?? [], habit.cadence, new Date())} day streak</span>
           </div>
           <div className="flex gap-1">
-            {habit.week.map((done, index) => (
+            {recentDays.map(({ day, dateKey }) => {
+              const date = new Date(`${dateKey}T12:00:00`)
+              const done = isCompletedOnDate(habit, date)
+              const scheduled = isScheduledOnDate(habit, date)
+              return (
               <div
-                key={index}
+                key={dateKey}
                 className={cn(
                   "flex-1 h-6 rounded border transition-colors",
-                  done ? "bg-primary border-primary" : "bg-muted border-border"
+                  done ? "bg-primary border-primary" : "bg-muted border-border",
+                  !scheduled && "opacity-40"
                 )}
-                title={`${DAYS[index]}: ${done ? "Completed" : "Missed"}`}
+                title={`${day}: ${done ? "Completed" : scheduled ? "Missed" : "Not scheduled"}`}
               />
-            ))}
+              )
+            })}
           </div>
         </div>
       ))}
@@ -347,13 +445,21 @@ function ProjectsProgress({ projects, tasks }: { projects: Project[]; tasks: Tas
     )
   }
 
+  const tasksByProject = new Map<string, Task[]>()
+  for (const task of tasks) {
+    if (!task.project) continue
+    const assigned = tasksByProject.get(task.project) ?? []
+    assigned.push(task)
+    tasksByProject.set(task.project, assigned)
+  }
+
   return (
     <div className="space-y-4">
       {projects.map((project) => {
-        const projectTasks = tasks.filter((t) => t.project === project.name)
+        const projectTasks = tasksByProject.get(project.name) ?? []
         const completedTasks = projectTasks.filter((t) => t.status === "done").length
         const totalTasks = projectTasks.length
-        const calculatedProgress = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : project.progress
+        const calculatedProgress = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0
 
         return (
           <div key={project.id} className="space-y-1">

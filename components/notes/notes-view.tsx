@@ -15,6 +15,7 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { loadUserData, saveUserData } from "@/lib/user-data"
 import { cn } from "@/lib/utils"
 import { FileTree } from "./file-tree"
 import { TiptapEditor } from "./tiptap-editor"
@@ -190,37 +191,52 @@ export function NotesView({
   const [storageLoadFailed, setStorageLoadFailed] = useState(false)
   const [storageError, setStorageError] = useState<string | null>(null)
 
+  useEffect(() => {
+    const query = window.matchMedia("(min-width: 1280px)")
+    const updateSidebar = () => setSidebarOpen(query.matches)
+    updateSidebar()
+    query.addEventListener("change", updateSidebar)
+    return () => query.removeEventListener("change", updateSidebar)
+  }, [])
+
   const selectedFile = useMemo(() => findNode(files, selectedFileId || ""), [files, selectedFileId])
   const visibleFiles = useMemo(() => filterFileTree(files, searchValue.trim()), [files, searchValue])
 
   useEffect(() => {
+    let active = true
     const timer = window.setTimeout(() => {
-      try {
-        const saved = window.localStorage.getItem(NOTES_STORAGE_KEY)
-        let loadedFiles = initialData.files || []
-        if (saved !== null) {
-          const parsed: unknown = JSON.parse(saved)
+      void (async () => {
+        try {
+          const parsed = await loadUserData<unknown>(NOTES_STORAGE_KEY)
+          let loadedFiles = initialData.files || []
+          if (parsed !== null) {
           if (!Array.isArray(parsed) || !parsed.every(isFileNode)) {
             throw new Error("Saved notes data is not a valid file list.")
           }
-          loadedFiles = parsed
+            loadedFiles = parsed
+          }
+          if (active) {
+            setFiles(loadedFiles)
+            const firstDocument = findFirstDocument(loadedFiles)
+            if (firstDocument) {
+              setSelectedFileId(firstDocument.id)
+              setOpenDocumentIds([firstDocument.id])
+            }
+          }
+        } catch (error) {
+          if (active) {
+            setStorageLoadFailed(true)
+            setStorageError(error instanceof Error ? error.message : "Could not load saved notes.")
+          }
+        } finally {
+          if (active) setStorageReady(true)
         }
-        setFiles(loadedFiles)
-        const firstDocument = findFirstDocument(loadedFiles)
-        if (firstDocument) {
-          setSelectedFileId(firstDocument.id)
-          setOpenDocumentIds([firstDocument.id])
-        }
-      } catch (error) {
-        setStorageLoadFailed(true)
-        setStorageError(
-          error instanceof Error ? error.message : "Could not load saved notes."
-        )
-      } finally {
-        setStorageReady(true)
-      }
+      })()
     }, 0)
-    return () => window.clearTimeout(timer)
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
   }, [initialData.files])
 
   useEffect(() => {
@@ -235,15 +251,10 @@ export function NotesView({
   useEffect(() => {
     if (!storageReady || storageLoadFailed) return
     const timer = window.setTimeout(() => {
-      try {
-        window.localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(files))
-        onUpdateDashboard?.({ files })
-        setStorageError(null)
-      } catch (error) {
-        setStorageError(
-          error instanceof Error ? error.message : "Could not save notes."
-        )
-      }
+      onUpdateDashboard?.({ files })
+      void saveUserData(NOTES_STORAGE_KEY, files)
+        .then(() => setStorageError(null))
+        .catch((error: unknown) => setStorageError(error instanceof Error ? error.message : "Could not save notes."))
     }, 150)
     return () => window.clearTimeout(timer)
   }, [files, onUpdateDashboard, storageLoadFailed, storageReady])
@@ -291,7 +302,6 @@ export function NotesView({
   }, [])
 
   const handleDeleteFile = useCallback((file: FileNode) => {
-    if (!confirm(`Delete "${file.name}"?`)) return
     const removedIds = collectNodeIds(file)
     setFiles((current) => removeNode(current, file.id))
     setOpenDocumentIds((current) => current.filter((id) => !removedIds.includes(id)))
@@ -328,7 +338,8 @@ export function NotesView({
             variant="ghost"
             size="icon-sm"
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="md:hidden"
+            aria-label={sidebarOpen ? "Hide file browser" : "Show file browser"}
+            title={sidebarOpen ? "Hide file browser" : "Show file browser"}
           >
             {sidebarOpen ? <ChevronLeft className="size-4" /> : <ChevronRight className="size-4" />}
           </Button>
@@ -372,7 +383,7 @@ export function NotesView({
       )}
 
       {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex min-w-0 flex-1 overflow-hidden">
         {/* Sidebar - File Tree */}
         <aside
           className={cn(
@@ -449,7 +460,7 @@ export function NotesView({
               </div>
 
               {/* Editor */}
-              <div className="flex-1 flex overflow-hidden">
+              <div className="flex min-w-0 flex-1 overflow-hidden">
                 <TiptapEditor
                   key={selectedFile.id}
                   content={selectedFile.content || ""}

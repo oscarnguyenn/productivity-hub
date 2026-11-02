@@ -35,6 +35,11 @@ export function formatDueDate(isoDate: string, now = new Date()) {
   return shortDateFormatter.format(due)
 }
 
+export function isDateBeforeToday(isoDate: string, now = new Date()) {
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`
+  return isoDate < today
+}
+
 export function timeToMinutes(value: string) {
   const [hours, minutes] = value.split(":").map(Number)
   return hours * 60 + minutes

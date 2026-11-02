@@ -11,6 +11,7 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { loadUserData, saveUserData } from "@/lib/user-data"
 import { cn } from "@/lib/utils"
 import { timeToMinutes } from "@/lib/format"
 import type { CalendarEvent, EventType } from "@/lib/types"
@@ -19,6 +20,7 @@ const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 const HOUR_HEIGHT = 64
 const GRID_HEIGHT = 24 * HOUR_HEIGHT
 const STORAGE_KEY = "productivity-hub-calendar-events-v1"
+const INITIAL_SCROLL_HOUR = 7
 
 const eventColors: Record<EventType, { card: string; badge: string }> = {
   class: {
@@ -56,6 +58,56 @@ interface EventInteraction {
   previewDate: string
   previewStart: number
   previewEnd: number
+}
+
+interface EventLane {
+  index: number
+  count: number
+}
+
+function calculateEventLanes(events: CalendarEvent[]): Map<string, EventLane> {
+  const byDate = new Map<string, CalendarEvent[]>()
+  for (const event of events) {
+    const dateEvents = byDate.get(event.date) ?? []
+    dateEvents.push(event)
+    byDate.set(event.date, dateEvents)
+  }
+
+  const lanes = new Map<string, EventLane>()
+  for (const dateEvents of byDate.values()) {
+    const sorted = [...dateEvents].sort(
+      (a, b) => timeToMinutes(a.start) - timeToMinutes(b.start) || timeToMinutes(a.end) - timeToMinutes(b.end)
+    )
+    let cluster: CalendarEvent[] = []
+    let clusterEnd = -1
+
+    const assignCluster = () => {
+      const laneEnds: number[] = []
+      const assignments: Array<{ event: CalendarEvent; lane: number }> = []
+      for (const event of cluster) {
+        const start = timeToMinutes(event.start)
+        const end = timeToMinutes(event.end)
+        let lane = laneEnds.findIndex((laneEnd) => laneEnd <= start)
+        if (lane < 0) lane = laneEnds.length
+        laneEnds[lane] = end
+        assignments.push({ event, lane })
+      }
+      for (const assignment of assignments) {
+        lanes.set(assignment.event.id, { index: assignment.lane, count: laneEnds.length })
+      }
+      cluster = []
+      clusterEnd = -1
+    }
+
+    for (const event of sorted) {
+      const start = timeToMinutes(event.start)
+      if (cluster.length && start >= clusterEnd) assignCluster()
+      cluster.push(event)
+      clusterEnd = Math.max(clusterEnd, timeToMinutes(event.end))
+    }
+    if (cluster.length) assignCluster()
+  }
+  return lanes
 }
 
 function dateKey(date: Date): string {
@@ -143,42 +195,43 @@ export function CalendarView({
   const [editingEventId, setEditingEventId] = useState<string | null>(null)
   const [interaction, setInteraction] = useState<EventInteraction | null>(null)
   const gridRef = useRef<HTMLDivElement>(null)
+  const scheduleScrollRef = useRef<HTMLDivElement>(null)
   const suppressClickRef = useRef(false)
 
   useEffect(() => {
+    let active = true
     const timer = window.setTimeout(() => {
-      try {
-        const saved = window.localStorage.getItem(STORAGE_KEY)
-        if (saved !== null) {
-          const parsed: unknown = JSON.parse(saved)
+      void (async () => {
+        try {
+          const parsed = await loadUserData<unknown>(STORAGE_KEY)
+          if (parsed !== null) {
           if (!Array.isArray(parsed) || !parsed.every(isCalendarEvent)) {
             throw new Error("Saved calendar data is not a valid event list.")
           }
-          setEvents(parsed)
+            if (active) setEvents(parsed)
+          }
+        } catch (error) {
+          if (active) {
+            setStorageLoadFailed(true)
+            setStorageError(error instanceof Error ? error.message : "Could not load saved calendar events.")
+          }
+        } finally {
+          if (active) setStorageReady(true)
         }
-      } catch (error) {
-        setStorageLoadFailed(true)
-        setStorageError(
-          error instanceof Error ? error.message : "Could not load saved calendar events."
-        )
-      } finally {
-        setStorageReady(true)
-      }
+      })()
     }, 0)
-    return () => window.clearTimeout(timer)
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
   }, [])
 
   useEffect(() => {
     if (!storageReady || storageLoadFailed) return
     const timer = window.setTimeout(() => {
-      try {
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(events))
-        setStorageError(null)
-      } catch (error) {
-        setStorageError(
-          error instanceof Error ? error.message : "Could not save calendar events."
-        )
-      }
+      void saveUserData(STORAGE_KEY, events)
+        .then(() => setStorageError(null))
+        .catch((error: unknown) => setStorageError(error instanceof Error ? error.message : "Could not save calendar events."))
     }, 100)
     return () => window.clearTimeout(timer)
   }, [events, storageLoadFailed, storageReady])
@@ -207,7 +260,7 @@ export function CalendarView({
   }, [currentDate])
 
   const editingEvent = events.find((event) => event.id === editingEventId) ?? null
-  const displayedEvents = events.map((event) => {
+  const displayedEvents = useMemo(() => events.map((event) => {
     if (interaction?.eventId !== event.id) return event
     return {
       ...event,
@@ -215,7 +268,23 @@ export function CalendarView({
       start: minutesToTime(interaction.previewStart),
       end: minutesToTime(interaction.previewEnd),
     }
-  })
+  }), [events, interaction])
+  const eventLanes = useMemo(() => calculateEventLanes(displayedEvents), [displayedEvents])
+  const eventsByDate = useMemo(() => {
+    const grouped = new Map<string, CalendarEvent[]>()
+    for (const event of displayedEvents) {
+      const dayEvents = grouped.get(event.date) ?? []
+      dayEvents.push(event)
+      grouped.set(event.date, dayEvents)
+    }
+    return grouped
+  }, [displayedEvents])
+
+  useEffect(() => {
+    if (view === "week" && scheduleScrollRef.current) {
+      scheduleScrollRef.current.scrollTop = INITIAL_SCROLL_HOUR * HOUR_HEIGHT - 8
+    }
+  }, [view])
 
   function navigate(delta: number) {
     setCurrentDate((date) => {
@@ -233,6 +302,15 @@ export function CalendarView({
 
   function goToToday() {
     setCurrentDate(new Date())
+  }
+
+  function scrollToCurrentTime() {
+    if (!scheduleScrollRef.current) return
+    const minutes = new Date().getHours() * 60 + new Date().getMinutes()
+    scheduleScrollRef.current.scrollTo({
+      top: Math.max(0, (minutes / 60 - 3) * HOUR_HEIGHT - 8),
+      behavior: "smooth",
+    })
   }
 
   function isToday(date: Date) {
@@ -386,6 +464,12 @@ export function CalendarView({
     setInteraction(null)
   }
 
+  function cancelInteraction(event: ReactPointerEvent<HTMLElement>) {
+    if (!interaction || interaction.pointerId !== event.pointerId) return
+    suppressClickRef.current = false
+    setInteraction(null)
+  }
+
   function eventCard(event: CalendarEvent, compact = false) {
     const displayEvent =
       interaction?.eventId === event.id
@@ -420,47 +504,47 @@ export function CalendarView({
     const end = timeToMinutes(displayEvent.end)
     const top = (start / 60) * HOUR_HEIGHT
     const height = Math.max(24, ((end - start) / 60) * HOUR_HEIGHT)
+    const lane = eventLanes.get(event.id) ?? { index: 0, count: 1 }
     return (
       <div
         key={event.id}
-        role="button"
-        tabIndex={0}
-        onClick={(clickEvent) => {
-          clickEvent.stopPropagation()
-          if (interaction) return
-          if (suppressClickRef.current) {
-            suppressClickRef.current = false
-            return
-          }
-          openEvent(event)
-        }}
-        onKeyDown={(keyEvent) => {
-          if (keyEvent.key === "Enter" || keyEvent.key === " ") openEvent(event)
-        }}
-        onPointerDown={(pointerEvent) =>
-          beginInteraction(pointerEvent, event, "move")
-        }
-        onPointerMove={updateInteraction}
-        onPointerUp={finishInteraction}
-        onPointerCancel={finishInteraction}
+        role="group"
+        aria-label={`${event.title}, ${formatTime(event.start)} to ${formatTime(event.end)}`}
         className={cn(
-          "absolute z-10 flex cursor-grab flex-col overflow-hidden rounded-md border px-2 py-1 text-left text-xs shadow-sm active:cursor-grabbing",
+          "absolute z-10 overflow-hidden rounded-md border text-xs shadow-sm",
           "touch-none select-none hover:shadow-md",
           eventColors[event.type].card
         )}
         style={{
           top,
           height,
-          left: "4px",
-          right: "4px",
+          left: lane.count === 1 ? "4px" : `calc(${lane.index * 100}% / ${lane.count} + 2px)`,
+          right: lane.count === 1 ? "4px" : `calc(${(lane.count - lane.index - 1) * 100}% / ${lane.count} + 2px)`,
         }}
         title={`${event.title}: ${formatTime(event.start)}–${formatTime(event.end)}. Drag to move or pull the bottom handle to resize.`}
       >
-        <span className="truncate font-semibold">{event.title}</span>
-        <span className="truncate opacity-75">
-          {formatTime(displayEvent.start)}–{formatTime(displayEvent.end)}
-        </span>
-        {event.location && <span className="truncate opacity-70">{event.location}</span>}
+        <button
+          type="button"
+          onClick={(clickEvent) => {
+            clickEvent.stopPropagation()
+            if (interaction) return
+            if (suppressClickRef.current) {
+              suppressClickRef.current = false
+              return
+            }
+            openEvent(event)
+          }}
+          onPointerDown={(pointerEvent) =>
+            beginInteraction(pointerEvent, event, "move")
+          }
+          className="flex h-full w-full cursor-grab flex-col overflow-hidden px-2 py-1 pb-2 text-left active:cursor-grabbing focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+        >
+          <span className="truncate font-semibold">{event.title}</span>
+          <span className="truncate opacity-75">
+            {formatTime(displayEvent.start)}–{formatTime(displayEvent.end)}
+          </span>
+          {event.location && <span className="truncate opacity-70">{event.location}</span>}
+        </button>
         <button
           type="button"
           aria-label={`Resize ${event.title}`}
@@ -468,9 +552,6 @@ export function CalendarView({
           onPointerDown={(pointerEvent) =>
             beginInteraction(pointerEvent, event, "resize")
           }
-          onPointerMove={updateInteraction}
-          onPointerUp={finishInteraction}
-          onPointerCancel={finishInteraction}
           onClick={(clickEvent) => clickEvent.stopPropagation()}
           className="absolute inset-x-1 bottom-0 flex h-2 cursor-ns-resize items-center justify-center"
         >
@@ -537,14 +618,23 @@ export function CalendarView({
           </span>
         ))}
         <span className="ml-auto">Drag events to move · Pull the bottom edge to stretch</span>
+        {view === "week" && (
+          <Button type="button" variant="outline" size="sm" onClick={scrollToCurrentTime}>
+            Jump to current time
+          </Button>
+        )}
         {storageError && <span className="w-full text-destructive">{storageError}</span>}
       </div>
 
       {view === "week" ? (
         <div className="overflow-hidden rounded-xl border border-border bg-card">
-          <div className="overflow-x-auto">
+          <div
+            ref={scheduleScrollRef}
+            className="overflow-auto"
+            style={{ maxHeight: "min(72vh, 760px)", scrollbarGutter: "stable" }}
+          >
             <div className="min-w-[900px]">
-              <div className="grid grid-cols-[56px_repeat(7,minmax(0,1fr))] border-b border-border">
+              <div className="sticky top-0 z-20 grid grid-cols-[56px_repeat(7,minmax(0,1fr))] border-b border-border bg-card">
                 <div className="border-r border-border" />
                 {weekDays.map((day, index) => (
                   <button
@@ -568,8 +658,8 @@ export function CalendarView({
                   </button>
                 ))}
               </div>
-              <div className="grid grid-cols-[56px_minmax(0,1fr)]">
-                <div className="border-r border-border">
+              <div className="grid grid-cols-[56px_repeat(7,minmax(0,1fr))]">
+                <div className="border-r border-border" style={{ height: GRID_HEIGHT }}>
                   {Array.from({ length: 24 }, (_, hour) => (
                     <div
                       key={hour}
@@ -583,11 +673,10 @@ export function CalendarView({
                 </div>
                 <div
                   ref={gridRef}
-                  className="relative grid grid-cols-7 overflow-y-auto"
-                  style={{ height: "min(72vh, 760px)" }}
+                  className="relative col-span-7 grid grid-cols-7"
                   onPointerMove={updateInteraction}
                   onPointerUp={finishInteraction}
-                  onPointerCancel={finishInteraction}
+                  onPointerCancel={cancelInteraction}
                 >
                   {weekDays.map((day) => {
                     const dayKey = dateKey(day)
@@ -605,8 +694,7 @@ export function CalendarView({
                         }}
                         onClick={(event) => addFromGrid(day, event)}
                       >
-                        {displayedEvents
-                          .filter((event) => event.date === dayKey)
+                        {(eventsByDate.get(dayKey) ?? [])
                           .map((event) => eventCard(event))}
                       </div>
                     )
@@ -639,13 +727,12 @@ export function CalendarView({
                       {day.getDate()}
                     </span>
                     <div className="space-y-1">
-                      {displayedEvents
-                        .filter((event) => event.date === dateKey(day))
+                      {(eventsByDate.get(dateKey(day)) ?? [])
                         .slice(0, 3)
                         .map((event) => eventCard(event, true))}
-                      {displayedEvents.filter((event) => event.date === dateKey(day)).length > 3 && (
+                      {(eventsByDate.get(dateKey(day)) ?? []).length > 3 && (
                         <p className="px-1 text-xs text-muted-foreground">
-                          +{displayedEvents.filter((event) => event.date === dateKey(day)).length - 3} more
+                          +{(eventsByDate.get(dateKey(day)) ?? []).length - 3} more
                         </p>
                       )}
                     </div>

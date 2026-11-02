@@ -21,11 +21,43 @@ import {
   ChevronDown,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { ConfirmAction } from "@/components/ui/confirm-action"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
+import { AccountManagement } from "@/components/auth/account-management"
+import { useAuth } from "@/components/auth/auth-provider"
 import type { UserProfile, WidgetLayoutItem } from "@/lib/types"
 import { defaultWidgetLayout, widgetMeta } from "@/lib/dashboard-layout"
 import { applyAppearance, colorThemes, getStoredColorTheme, type ColorTheme, type ThemeMode } from "@/lib/theme"
+import { loadUserData, saveUserData } from "@/lib/user-data"
+import { createSupabaseBrowserClient } from "@/lib/supabase/client"
+
+const BACKUP_DATA_KEYS = [
+  "productivity-hub-tasks-v1",
+  "productivity-hub-calendar-events-v1",
+  "productivity-hub-notes-files-v1",
+  "productivity-hub-goals-v1",
+  "productivity-hub-projects-v1",
+  "productivity-hub-habits-v1",
+  "productivity-hub-sac-tracker-v1",
+] as const
+const EMPTY_BACKUP_DATA = {
+  "productivity-hub-tasks-v1": [],
+  "productivity-hub-calendar-events-v1": [],
+  "productivity-hub-notes-files-v1": [],
+  "productivity-hub-goals-v1": [],
+  "productivity-hub-projects-v1": [],
+  "productivity-hub-habits-v1": [],
+  "productivity-hub-sac-tracker-v1": {
+    subjects: [],
+    sessions: [],
+    timer: { subjectId: null, intention: "", mode: "stopwatch", goalMinutes: 25, elapsedSeconds: 0, startedAt: null, sessionStartedAt: null },
+  },
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object"
+}
 
 function getInitialTheme(): ThemeMode {
   if (typeof window !== "undefined") {
@@ -45,6 +77,7 @@ export function SettingsView({
   onUpdateUser?: (user: Partial<UserProfile>) => void
   onUpdateLayout?: (layout: WidgetLayoutItem[]) => void
 }) {
+  const { profile: authProfile, configured } = useAuth()
   const [user, setUser] = useState(initialUser)
   const [layout, setLayout] = useState(initialLayout)
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme)
@@ -57,6 +90,7 @@ export function SettingsView({
   })
   const [activeTab, setActiveTab] = useState<"profile" | "appearance" | "dashboard" | "notifications" | "data" | "security">("profile")
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle")
+  const [dataStatus, setDataStatus] = useState<string | null>(null)
 
   useEffect(() => {
     applyAppearance(theme, colorTheme)
@@ -83,51 +117,106 @@ export function SettingsView({
     setTimeout(() => setSaveStatus("idle"), 2000)
   }
 
-  const handleExportData = () => {
-    const data = {
-      user,
-      layout,
-      theme,
-      colorTheme,
-      notifications,
-      exportedAt: new Date().toISOString(),
+  const handleExportData = async () => {
+    try {
+      const modules = await Promise.all(BACKUP_DATA_KEYS.map(async (key) => [
+        key,
+        await loadUserData(key) ?? EMPTY_BACKUP_DATA[key],
+      ] as const))
+      const data = {
+        format: "productivity-hub-backup",
+        version: 3,
+        user: { name: user.name },
+        layout,
+        theme,
+        colorTheme,
+        notifications,
+        modules: Object.fromEntries(modules),
+        exportedAt: new Date().toISOString(),
+      }
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = `productivity-hub-backup-${new Date().toISOString().split("T")[0]}.json`
+      a.click()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      setDataStatus("Backup downloaded.")
+    } catch (error) {
+      setDataStatus(error instanceof Error ? error.message : "Could not export your data.")
     }
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
-    a.download = `productivity-hub-backup-${new Date().toISOString().split("T")[0]}.json`
-    a.click()
-    URL.revokeObjectURL(url)
   }
 
   const handleImportData = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) return
+    if (file.size > 30 * 1024 * 1024) {
+      setDataStatus("Backup must be 30 MB or smaller.")
+      event.target.value = ""
+      return
+    }
     const reader = new FileReader()
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
-        const data = JSON.parse(e.target?.result as string)
-        if (data.user) setUser(data.user)
-        if (data.layout) setLayout(data.layout)
+        const data: unknown = JSON.parse(String(e.target?.result ?? ""))
+        if (!isRecord(data)) throw new Error("This file is not a valid Productivity Hub backup.")
+        if (data.modules !== undefined) {
+          const moduleData = data.modules
+          const legacyKeys = BACKUP_DATA_KEYS.filter((key) =>
+            key !== "productivity-hub-projects-v1" && key !== "productivity-hub-habits-v1"
+          )
+          if (!isRecord(moduleData) || !legacyKeys.every((key) => key in moduleData)) {
+            throw new Error("Backup must include tasks, calendar, notes, goals, and study tracker data.")
+          }
+          if (Object.keys(moduleData).some((key) => !BACKUP_DATA_KEYS.includes(key as typeof BACKUP_DATA_KEYS[number]))) {
+            throw new Error("Backup contains unsupported data sections.")
+          }
+          const modules = { ...EMPTY_BACKUP_DATA, ...moduleData }
+          for (const key of BACKUP_DATA_KEYS.slice(0, -1)) {
+            if (!Array.isArray(modules[key])) throw new Error(`Backup section ${key} is invalid.`)
+          }
+          const studyData = modules["productivity-hub-sac-tracker-v1"]
+          if (!isRecord(studyData) || !Array.isArray(studyData.subjects) || !Array.isArray(studyData.sessions) || !isRecord(studyData.timer)) {
+            throw new Error("Backup study tracker data is invalid.")
+          }
+          if (configured) {
+            const supabase = createSupabaseBrowserClient()
+            if (!supabase) throw new Error("Supabase client is unavailable.")
+            const { error } = await supabase.rpc("restore_user_data", { backup: modules })
+            if (error) throw error
+          } else {
+            for (const key of BACKUP_DATA_KEYS) await saveUserData(key, modules[key])
+          }
+        }
+        const importedUser = data.user
+        if (isRecord(importedUser) && typeof importedUser.name === "string") {
+          setUser((current) => ({ ...current, name: importedUser.name as string }))
+        }
+        if (Array.isArray(data.layout)) setLayout(data.layout as WidgetLayoutItem[])
         if (data.theme === "light" || data.theme === "dark" || data.theme === "system") setTheme(data.theme)
-        if (data.colorTheme && colorThemes.some((item) => item.id === data.colorTheme)) setColorTheme(data.colorTheme)
-        if (data.notifications) setNotifications(data.notifications)
-        alert("Data imported successfully!")
-      } catch {
-        alert("Invalid backup file")
+        if (typeof data.colorTheme === "string" && colorThemes.some((item) => item.id === data.colorTheme)) setColorTheme(data.colorTheme as ColorTheme)
+        if (isRecord(data.notifications)) setNotifications((current) => ({ ...current, ...data.notifications as Partial<typeof current> }))
+        setDataStatus("Backup imported. Reload the page to refresh your data.")
+      } catch (error) {
+        setDataStatus(error instanceof Error ? `Import failed: ${error.message}` : "Import failed. Check the file format and your account permissions, then try again.")
       }
     }
+    reader.onerror = () => setDataStatus("Could not read the selected backup file.")
     reader.readAsText(file)
     event.target.value = ""
   }
 
-  const handleClearAllData = () => {
-    if (confirm("Are you sure? This will delete all your data and cannot be undone.")) {
-      if (confirm("This is irreversible. Type 'DELETE' to confirm.")) {
-        // In a real app, this would clear localStorage, IndexedDB, etc.
-        alert("All data cleared (demo only)")
-      }
+  const handleClearLocalData = async () => {
+    try {
+      await Promise.all(BACKUP_DATA_KEYS.map((key) => saveUserData(key, EMPTY_BACKUP_DATA[key])))
+      BACKUP_DATA_KEYS.forEach((key) => window.localStorage.removeItem(key))
+      for (const key of [
+      "theme",
+      "color-theme",
+      ]) window.localStorage.removeItem(key)
+      window.location.reload()
+    } catch (error) {
+      setDataStatus(error instanceof Error ? error.message : "Could not clear saved data.")
     }
   }
 
@@ -187,12 +276,10 @@ export function SettingsView({
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium mb-1">Role</label>
-                    <Input
-                      value={user.role}
-                      onChange={(e) => setUser((u) => ({ ...u, role: e.target.value }))}
-                      placeholder="Your role"
-                    />
+                    <label className="block text-sm font-medium mb-1">Account role</label>
+                    <p className="flex h-8 items-center rounded-md border border-input bg-muted px-2.5 text-sm" aria-label="Account role">
+                      {authProfile?.role === "admin" ? "Administrator" : configured ? "User" : user.role}
+                    </p>
                   </div>
                 </div>
                 <div className="flex justify-end">
@@ -426,6 +513,7 @@ export function SettingsView({
 
           {activeTab === "data" && (
             <div className="space-y-6">
+              {dataStatus && <p role="status" className="text-sm text-muted-foreground">{dataStatus}</p>}
               <SettingsSection title="Export Data" description="Download a backup of all your data">
                 <div className="flex items-center gap-4">
                   <div className="p-3 bg-muted rounded-lg">
@@ -434,7 +522,7 @@ export function SettingsView({
                   <div>
                     <p className="font-medium">Export Backup</p>
                     <p className="text-sm text-muted-foreground">
-                      Download a JSON file containing your profile, layout, preferences, and all data.
+                      Download a JSON backup containing your saved tasks, calendar, notes, goals, projects, habits, study tracker, and preferences.
                     </p>
                   </div>
                   <Button onClick={handleExportData}>
@@ -452,7 +540,7 @@ export function SettingsView({
                   <div className="flex-1">
                     <p className="font-medium">Import Backup</p>
                     <p className="text-sm text-muted-foreground">
-                      Select a previously exported JSON file to restore your data.
+                      Restore a full backup to this account. This replaces the saved task, calendar, notes, goals, projects, habits, and tracker data.
                     </p>
                   </div>
                   <label className="cursor-pointer">
@@ -475,13 +563,23 @@ export function SettingsView({
                   <div>
                     <p className="font-medium text-red-700 dark:text-red-300">Clear All Data</p>
                     <p className="text-sm text-red-600 dark:text-red-400">
-                      Permanently delete all your data including tasks, habits, goals, notes, and settings.
+                      Replace your saved tasks, calendar events, notes, goals, and study tracker with empty data.
                     </p>
                   </div>
-                  <Button variant="destructive" onClick={handleClearAllData}>
-                    <Trash2 className="size-3.5 mr-1.5" />
-                    Clear Everything
-                  </Button>
+                  <ConfirmAction
+                    title="Clear saved data?"
+                    description="This replaces your saved tasks, calendar events, notes, goals, and study tracker data with empty data for this account. This cannot be undone."
+                    confirmLabel="Clear account data"
+                    confirmationText="DELETE"
+                    onConfirm={handleClearLocalData}
+                  >
+                    {(openConfirmation) => (
+                      <Button variant="destructive" onClick={openConfirmation}>
+                        <Trash2 className="size-3.5 mr-1.5" />
+                        Clear Everything
+                      </Button>
+                    )}
+                  </ConfirmAction>
                 </div>
               </SettingsSection>
             </div>
@@ -533,6 +631,7 @@ export function SettingsView({
                   <p className="text-sm text-muted-foreground">Only one active session (demo)</p>
                 </div>
               </SettingsSection>
+              <AccountManagement />
             </div>
           )}
         </div>

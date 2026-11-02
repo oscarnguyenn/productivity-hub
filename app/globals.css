@@ -279,6 +279,52 @@
   }
 }
 
+.note-editor-scroll .tableWrapper {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 1.25rem 0;
+}
+
+.note-editor-scroll .ProseMirror table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.note-editor-scroll .ProseMirror th,
+.note-editor-scroll .ProseMirror td {
+  position: relative;
+  min-width: 6rem;
+  border: 1px solid color-mix(in oklab, var(--border) 80%, var(--foreground) 20%);
+  padding: 0.5rem 0.625rem;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.note-editor-scroll .ProseMirror th:not([style*="background-color"]) {
+  background-color: var(--muted);
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.note-editor-scroll .ProseMirror .column-resize-handle {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  right: -3px;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  background-color: var(--primary);
+  opacity: 0.35;
+}
+
+.note-editor-scroll .ProseMirror .column-resize-handle:hover,
+.note-editor-scroll .ProseMirror .column-resize-dragging {
+  opacity: 1;
+}
+
 @media print {
   body * {
     visibility: hidden !important;

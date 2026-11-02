@@ -12,6 +12,7 @@ import {
   FilePlus,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { ConfirmAction } from "@/components/ui/confirm-action"
 import { cn } from "@/lib/utils"
 import type { FileNode } from "@/lib/types"
 
@@ -196,13 +197,21 @@ function FileTreeNode({
             <Edit2 className="size-3.5" />
             Rename
           </button>
-          <button
-            onClick={handleDelete}
-            className="flex items-center gap-2 w-full px-2 py-1.5 text-sm rounded hover:bg-muted transition-colors text-destructive"
+          <ConfirmAction
+            title={`Delete ${node.type === "folder" ? "folder" : "document"}?`}
+            description={`Delete “${node.name}”${node.type === "folder" ? " and everything inside it" : ""}? This cannot be undone.`}
+            onConfirm={handleDelete}
           >
-            <Trash2 className="size-3.5" />
-            Delete
-          </button>
+            {(openConfirmation) => (
+              <button
+                onClick={openConfirmation}
+                className="flex items-center gap-2 w-full px-2 py-1.5 text-sm rounded hover:bg-muted transition-colors text-destructive"
+              >
+                <Trash2 className="size-3.5" />
+                Delete
+              </button>
+            )}
+          </ConfirmAction>
         </div>
       )}
     </>
