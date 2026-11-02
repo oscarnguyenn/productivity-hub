@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import {
   Plus,
   Flame,
@@ -9,22 +9,46 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
-  MoreHorizontal,
   Edit,
   Trash2,
-  RotateCcw,
-  Bell,
   X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { ConfirmAction } from "@/components/ui/confirm-action"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
 import { cn } from "@/lib/utils"
-import { formatDueDate, formatLongDate } from "@/lib/format"
+import { formatLongDate } from "@/lib/format"
+import { loadUserData, saveUserData } from "@/lib/user-data"
+import { calculateStreak, getHabitCompletionRate, isCompletedOnDate, isScheduledOnDate, localDateKey } from "@/lib/habit-utils"
 import type { Habit } from "@/lib/types"
 
+const HABITS_STORAGE_KEY = "productivity-hub-habits-v1"
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-const DAYS_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+function getMonday(date: Date): Date {
+  const monday = new Date(date)
+  monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7))
+  monday.setHours(0, 0, 0, 0)
+  return monday
+}
+
+function isHabit(value: unknown): value is Habit {
+  if (!value || typeof value !== "object") return false
+  const habit = value as Record<string, unknown>
+  return typeof habit.id === "string" &&
+    typeof habit.name === "string" &&
+    typeof habit.cadence === "string" &&
+    typeof habit.streak === "number" &&
+    typeof habit.completedToday === "boolean" &&
+    Array.isArray(habit.week) &&
+    habit.week.length === 7 &&
+    habit.week.every((day) => typeof day === "boolean") &&
+    (habit.completionDates === undefined || (
+      Array.isArray(habit.completionDates) &&
+      habit.completionDates.every((date) => typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date))
+    ))
+}
 
 export function HabitsView({
   habits: initialHabits,
@@ -39,25 +63,18 @@ export function HabitsView({
 }) {
   const [habits, setHabits] = useState(initialHabits)
   const [currentWeek, setCurrentWeek] = useState(new Date())
+  const [todayKey, setTodayKey] = useState("")
+  const [storageReady, setStorageReady] = useState(false)
+  const [storageLoadFailed, setStorageLoadFailed] = useState(false)
+  const [storageError, setStorageError] = useState<string | null>(null)
   const [showAddModal, setShowAddModal] = useState(false)
   const [editingHabit, setEditingHabit] = useState<Habit | null>(null)
   const [newHabitName, setNewHabitName] = useState("")
   const [newHabitCadence, setNewHabitCadence] = useState("Daily")
-  const [newHabitReminder, setNewHabitReminder] = useState("")
 
   const weekStart = useMemo(() => {
-    const d = new Date(currentWeek)
-    d.setDate(d.getDate() - d.getDay() + 1) // Monday
-    d.setHours(0, 0, 0, 0)
-    return d
+    return getMonday(currentWeek)
   }, [currentWeek])
-
-  const weekEnd = useMemo(() => {
-    const d = new Date(weekStart)
-    d.setDate(d.getDate() + 6)
-    d.setHours(23, 59, 59, 999)
-    return d
-  }, [weekStart])
 
   const weekDates = useMemo(() => {
     const dates: Date[] = []
@@ -69,22 +86,87 @@ export function HabitsView({
     return dates
   }, [weekStart])
 
-  const today = useMemo(() => new Date(), [])
+  const today = todayKey ? new Date(`${todayKey}T12:00:00`) : new Date(weekStart)
 
-  const isToday = (date: Date) => date.toDateString() === today.toDateString()
+  const isToday = (date: Date) => localDateKey(date) === todayKey
 
   const getWeekProgress = (habit: Habit) => {
-    const completed = habit.week.filter(Boolean).length
-    return Math.round((completed / 7) * 100)
+    return getHabitCompletionRate(habit, weekDates, today)
   }
 
-  const totalStreak = habits.reduce((sum, h) => sum + h.streak, 0)
-  const completedToday = habits.filter((h) => h.completedToday).length
+  const totalStreak = habits.reduce((sum, habit) =>
+    sum + calculateStreak(habit.completionDates ?? [], habit.cadence, today), 0)
+  const completedToday = habits.filter((habit) => isCompletedOnDate(habit, today)).length
   const totalHabits = habits.length
 
+  useEffect(() => {
+    const updateToday = () => setTodayKey(localDateKey(new Date()))
+    const timerId = window.setTimeout(updateToday, 0)
+    const intervalId = window.setInterval(updateToday, 60_000)
+    return () => {
+      window.clearTimeout(timerId)
+      window.clearInterval(intervalId)
+    }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    const timerId = window.setTimeout(() => {
+      void (async () => {
+        const migrationToday = new Date()
+        const migrationTodayKey = localDateKey(migrationToday)
+        const migrationWeekStart = getMonday(migrationToday)
+        const normalize = (habit: Habit): Habit => {
+          const dates = (habit.completionDates ?? habit.week.flatMap((done, index) => {
+            if (!done) return []
+            const date = new Date(migrationWeekStart)
+            date.setDate(date.getDate() + index)
+            return [localDateKey(date)]
+          })).filter((date) => date <= migrationTodayKey)
+          if (habit.completedToday && !dates.includes(migrationTodayKey)) dates.push(migrationTodayKey)
+          return {
+            ...habit,
+            completionDates: [...new Set(dates)],
+            completedToday: dates.includes(migrationTodayKey),
+            streak: calculateStreak(dates, habit.cadence, migrationToday),
+          }
+        }
+        try {
+          const saved = await loadUserData<unknown>(HABITS_STORAGE_KEY)
+          if (saved !== null) {
+            if (!Array.isArray(saved) || !saved.every(isHabit)) throw new Error("Saved habit data is not a valid habit list.")
+            if (active) setHabits(saved.map(normalize))
+          } else if (active) {
+            setHabits(initialHabits.map(normalize))
+          }
+        } catch (error) {
+          if (active) {
+            setStorageLoadFailed(true)
+            setStorageError(error instanceof Error ? error.message : "Could not load saved habits.")
+          }
+        } finally {
+          if (active) setStorageReady(true)
+        }
+      })()
+    }, 0)
+    return () => {
+      active = false
+      window.clearTimeout(timerId)
+    }
+  }, [initialHabits])
+
+  useEffect(() => {
+    if (!storageReady || storageLoadFailed) return
+    const timerId = window.setTimeout(() => {
+      void saveUserData(HABITS_STORAGE_KEY, habits)
+        .then(() => setStorageError(null))
+        .catch((error: unknown) => setStorageError(error instanceof Error ? error.message : "Could not save habits."))
+    }, 100)
+    return () => window.clearTimeout(timerId)
+  }, [habits, storageLoadFailed, storageReady])
+
   const handleAddHabit = () => {
-    if (!newHabitName.trim()) return
-    const now = new Date()
+    if (!storageReady || !newHabitName.trim()) return
     const newHabit: Habit = {
       id: `habit-${crypto.randomUUID()}`,
       name: newHabitName.trim(),
@@ -92,6 +174,7 @@ export function HabitsView({
       streak: 0,
       completedToday: false,
       week: [false, false, false, false, false, false, false],
+      completionDates: [],
     }
     setHabits((current) => [newHabit, ...current])
     onAddHabit?.(newHabit)
@@ -99,20 +182,23 @@ export function HabitsView({
     setShowAddModal(false)
   }
 
-  const handleToggleHabit = (habit: Habit) => {
-    const completedToday = !habit.completedToday
-    const week = [...habit.week]
-    const todayIndex = today.getDay() === 0 ? 6 : today.getDay() - 1 // Convert Sun=0 to Mon=0
-    week[todayIndex] = completedToday
-
+  const handleToggleHabit = (habit: Habit, date: Date) => {
+    const dateKey = localDateKey(date)
+    if (dateKey > todayKey || !isScheduledOnDate(habit, date)) return
+    const existing = new Set(habit.completionDates ?? [])
+    if (existing.has(dateKey)) existing.delete(dateKey)
+    else existing.add(dateKey)
+    const completionDates = [...existing]
+    const completedToday = existing.has(todayKey)
     setHabits((current) =>
       current.map((h) => {
         if (h.id !== habit.id) return h
         return {
           ...h,
           completedToday,
-          streak: completedToday ? h.streak + 1 : Math.max(0, h.streak - 1),
-          week,
+          completionDates,
+          streak: calculateStreak(completionDates, h.cadence, today),
+          week: weekDates.map((weekDate) => existing.has(localDateKey(weekDate))),
         }
       })
     )
@@ -120,10 +206,8 @@ export function HabitsView({
   }
 
   const handleDeleteHabit = (id: string) => {
-    if (confirm("Are you sure you want to delete this habit?")) {
-      setHabits((current) => current.filter((h) => h.id !== id))
-      onDeleteHabit?.(id)
-    }
+    setHabits((current) => current.filter((h) => h.id !== id))
+    onDeleteHabit?.(id)
   }
 
   const handleEditHabit = (habit: Habit) => {
@@ -170,12 +254,14 @@ export function HabitsView({
           <Button variant="ghost" size="icon-sm" onClick={() => navigateWeek(1)}>
             <ChevronRight className="size-4" />
           </Button>
-          <Button onClick={() => setShowAddModal(true)}>
+          <Button disabled={!storageReady} onClick={() => setShowAddModal(true)}>
             <Plus className="size-3.5 mr-1.5" />
             New Habit
           </Button>
         </div>
       </div>
+      {storageError && <p role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{storageError}</p>}
+      {!storageReady && <p role="status" className="text-sm text-muted-foreground">Loading saved habits…</p>}
 
       {/* Stats Row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -235,16 +321,17 @@ export function HabitsView({
                     <div className="flex items-center gap-3">
                       <button
                         type="button"
-                        onClick={() => handleToggleHabit(habit)}
+                        onClick={() => handleToggleHabit(habit, today)}
+                        disabled={!storageReady || !isScheduledOnDate(habit, today)}
                         className={cn(
                           "flex size-6 shrink-0 items-center justify-center rounded-full border-2 transition-colors",
-                          habit.completedToday
+                          isCompletedOnDate(habit, today)
                             ? "border-primary bg-primary text-white"
                             : "border-border bg-background hover:border-primary/50"
                         )}
-                        aria-label={habit.completedToday ? "Mark incomplete" : "Mark complete"}
+                        aria-label={isCompletedOnDate(habit, today) ? "Mark incomplete today" : "Mark complete today"}
                       >
-                        {habit.completedToday && <Check className="size-3.5" />}
+                        {isCompletedOnDate(habit, today) && <Check className="size-3.5" />}
                       </button>
                       <div>
                         <p className="font-medium text-sm">{habit.name}</p>
@@ -252,11 +339,13 @@ export function HabitsView({
                       </div>
                     </div>
                   </td>
-                  {habit.week.map((done, index) => (
-                    <td key={index} className="p-2 text-center">
+                  {weekDates.map((date, index) => {
+                    const done = isCompletedOnDate(habit, date)
+                    return (
+                    <td key={localDateKey(date)} className="p-2 text-center">
                       <button
                         type="button"
-                        onClick={() => handleToggleHabit(habit)}
+                        onClick={() => handleToggleHabit(habit, date)}
                         className={cn(
                           "mx-auto size-8 rounded-full border-2 transition-colors",
                           done
@@ -265,13 +354,14 @@ export function HabitsView({
                             ? "border-primary/50 bg-primary/5"
                             : "border-border bg-background hover:border-primary/30"
                         )}
-                        disabled={weekDates[index] > today}
-                        aria-label={done ? "Completed" : "Mark complete"}
+                        disabled={!storageReady || localDateKey(date) > todayKey || !isScheduledOnDate(habit, date)}
+                        aria-label={`${habit.name}, ${date.toLocaleDateString()}, ${done ? "completed" : "mark complete"}`}
                       >
                         {done && <Check className="size-4 text-white" />}
                       </button>
                     </td>
-                  ))}
+                    )
+                  })}
                   <td className="p-3 text-center">
                     <div className="w-full max-w-xs mx-auto">
                       <Progress value={getWeekProgress(habit)} className="h-2" />
@@ -287,7 +377,7 @@ export function HabitsView({
                   <td colSpan={9} className="p-12 text-center text-muted-foreground">
                     <Flame className="size-12 mx-auto mb-3 opacity-30" />
                     <p className="text-sm">No habits yet</p>
-                    <Button variant="outline" size="sm" className="mt-2" onClick={() => setShowAddModal(true)}>
+                    <Button variant="outline" size="sm" className="mt-2" disabled={!storageReady} onClick={() => setShowAddModal(true)}>
                       Create your first habit
                     </Button>
                   </td>
@@ -305,11 +395,12 @@ export function HabitsView({
           {habits.map((habit) => (
             <HabitCard
               key={habit.id}
-              habit={habit}
+              habit={{ ...habit, streak: calculateStreak(habit.completionDates ?? [], habit.cadence, today) }}
               weekDates={weekDates}
               today={today}
               isToday={isToday}
-              onToggle={() => handleToggleHabit(habit)}
+              onToggle={() => handleToggleHabit(habit, today)}
+              onToggleDate={(date) => handleToggleHabit(habit, date)}
               onEdit={() => handleEditHabit(habit)}
               onDelete={() => handleDeleteHabit(habit.id)}
             />
@@ -319,7 +410,7 @@ export function HabitsView({
               <Flame className="size-16 mx-auto mb-4 opacity-30" />
               <h3 className="text-lg font-medium mb-2">No habits yet</h3>
               <p className="text-muted-foreground mb-4">Start building habits today</p>
-              <Button onClick={() => setShowAddModal(true)}>
+              <Button disabled={!storageReady} onClick={() => setShowAddModal(true)}>
                 <Plus className="size-3.5 mr-1.5" />
                 Create Habit
               </Button>
@@ -358,14 +449,7 @@ export function HabitsView({
                 <option value="Daily">Daily</option>
                 <option value="Weekdays">Weekdays (Mon-Fri)</option>
                 <option value="Weekends">Weekends (Sat-Sun)</option>
-                <option value="Custom">Custom schedule</option>
               </select>
-              <Input
-                value={newHabitReminder}
-                onChange={(e) => setNewHabitReminder(e.target.value)}
-                placeholder="Reminder time (optional, e.g., 07:00)"
-                type="time"
-              />
               <div className="flex justify-end gap-2 pt-4 border-t border-border">
                 <Button variant="outline" onClick={() => {
                   setShowAddModal(false)
@@ -414,6 +498,7 @@ function HabitCard({
   today,
   isToday,
   onToggle,
+  onToggleDate,
   onEdit,
   onDelete,
 }: {
@@ -422,11 +507,12 @@ function HabitCard({
   today: Date
   isToday: (date: Date) => boolean
   onToggle: () => void
+  onToggleDate: (date: Date) => void
   onEdit: () => void
   onDelete: () => void
 }) {
-  const weekProgress = Math.round((habit.week.filter(Boolean).length / 7) * 100)
-  const isOverdue = !habit.completedToday && habit.cadence === "Daily"
+  const weekProgress = getHabitCompletionRate(habit, weekDates, today)
+  const completedToday = isCompletedOnDate(habit, today)
 
   return (
     <div className="rounded-xl border border-border bg-card p-4">
@@ -439,9 +525,17 @@ function HabitCard({
           <Button variant="ghost" size="icon-xs" onClick={onEdit} aria-label="Edit habit">
             <Edit className="size-3.5" />
           </Button>
-          <Button variant="ghost" size="icon-xs" onClick={onDelete} aria-label="Delete habit">
-            <Trash2 className="size-3.5" />
-          </Button>
+          <ConfirmAction
+            title="Delete habit?"
+            description={`Delete “${habit.name}”? Its completion history will be removed.`}
+            onConfirm={onDelete}
+          >
+            {(openConfirmation) => (
+              <Button variant="ghost" size="icon-xs" onClick={openConfirmation} aria-label="Delete habit">
+                <Trash2 className="size-3.5" />
+              </Button>
+            )}
+          </ConfirmAction>
         </div>
       </div>
 
@@ -449,15 +543,16 @@ function HabitCard({
         <button
           type="button"
           onClick={onToggle}
+          disabled={!isScheduledOnDate(habit, today)}
           className={cn(
             "flex size-12 shrink-0 items-center justify-center rounded-full border-3 transition-colors",
-            habit.completedToday
+            completedToday
               ? "border-green-500 bg-green-500 text-white"
               : "border-border bg-background hover:border-primary/50"
           )}
-          aria-label={habit.completedToday ? "Mark incomplete" : "Mark complete"}
+          aria-label={completedToday ? "Mark incomplete today" : "Mark complete today"}
         >
-          {habit.completedToday && <Check className="size-6" />}
+          {completedToday && <Check className="size-6" />}
         </button>
         <div className="flex-1 text-right">
           <p className="text-3xl font-bold tabular-nums">{habit.streak}</p>
@@ -475,11 +570,13 @@ function HabitCard({
         </div>
         <Progress value={weekProgress} />
         <div className="flex gap-1">
-          {habit.week.map((done, index) => (
+          {weekDates.map((date, index) => {
+            const done = isCompletedOnDate(habit, date)
+            return (
             <button
-              key={index}
+              key={localDateKey(date)}
               type="button"
-              onClick={onToggle}
+              onClick={() => onToggleDate(date)}
               className={cn(
                 "flex-1 h-2 rounded transition-colors",
                 done
@@ -488,9 +585,11 @@ function HabitCard({
                   ? "bg-primary/20"
                   : "bg-border"
               )}
-              disabled={weekDates[index] > today}
+              disabled={localDateKey(date) > localDateKey(today) || !isScheduledOnDate(habit, date)}
+              aria-label={`${habit.name}, ${date.toLocaleDateString()}, ${done ? "completed" : "mark complete"}`}
             />
-          ))}
+            )
+          })}
         </div>
       </div>
     </div>

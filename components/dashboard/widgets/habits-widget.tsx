@@ -2,6 +2,7 @@
 
 import { WidgetFrame } from "@/components/dashboard/widget-frame"
 import { widgetMeta } from "@/lib/dashboard-layout"
+import { calculateStreak, isCompletedOnDate, localDateKey } from "@/lib/habit-utils"
 import type { Habit } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -12,6 +13,13 @@ export function HabitsWidget({
   habits: Habit[]
   onToggle: (id: string) => void
 }) {
+  const today = new Date()
+  const recentDates = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(today)
+    date.setDate(date.getDate() - (6 - index))
+    return date
+  })
+
   return (
     <WidgetFrame title={widgetMeta.habits.title} href={widgetMeta.habits.href}>
       <ul className="space-y-3">
@@ -25,7 +33,7 @@ export function HabitsWidget({
               <span
                 className={cn(
                   "flex size-4 shrink-0 items-center justify-center rounded-full border",
-                  habit.completedToday
+                  isCompletedOnDate(habit, today)
                     ? "border-foreground bg-foreground"
                     : "border-border bg-background"
                 )}
@@ -34,20 +42,23 @@ export function HabitsWidget({
               <span className="min-w-0">
                 <span className="block truncate text-sm font-medium">{habit.name}</span>
                 <span className="text-xs text-muted-foreground">
-                  {habit.streak} day streak
+                  {calculateStreak(habit.completionDates ?? [], habit.cadence, today)} day streak
                 </span>
               </span>
             </button>
             <div className="flex gap-1">
-              {habit.week.map((done, index) => (
+              {recentDates.map((date) => {
+                const done = isCompletedOnDate(habit, date)
+                return (
                 <span
-                  key={`${habit.id}-${index}`}
+                  key={`${habit.id}-${localDateKey(date)}`}
                   className={cn(
                     "size-1.5 rounded-full",
                     done ? "bg-foreground" : "bg-border"
                   )}
                 />
-              ))}
+                )
+              })}
             </div>
           </li>
         ))}

@@ -117,6 +117,156 @@
   --sidebar-ring: oklch(0.556 0 0);
 }
 
+:root[data-color-theme="ocean"] {
+  --background: oklch(0.985 0.008 230);
+  --primary: oklch(0.51 0.13 235);
+  --primary-foreground: oklch(0.99 0.005 230);
+  --secondary: oklch(0.94 0.035 230);
+  --secondary-foreground: oklch(0.27 0.06 240);
+  --accent: oklch(0.95 0.04 225);
+  --accent-foreground: oklch(0.27 0.06 240);
+  --ring: oklch(0.64 0.13 235);
+  --sidebar-primary: oklch(0.51 0.13 235);
+  --sidebar-accent: oklch(0.95 0.04 225);
+}
+
+.dark[data-color-theme="ocean"] {
+  --background: oklch(0.18 0.025 245);
+  --card: oklch(0.22 0.028 245);
+  --popover: oklch(0.22 0.028 245);
+  --primary: oklch(0.72 0.13 225);
+  --primary-foreground: oklch(0.19 0.035 245);
+  --secondary: oklch(0.3 0.04 240);
+  --secondary-foreground: oklch(0.95 0.025 225);
+  --muted: oklch(0.27 0.03 245);
+  --accent: oklch(0.3 0.045 235);
+  --accent-foreground: oklch(0.95 0.025 225);
+  --ring: oklch(0.65 0.13 225);
+  --sidebar: oklch(0.2 0.03 245);
+  --sidebar-primary: oklch(0.72 0.13 225);
+  --sidebar-accent: oklch(0.3 0.045 235);
+}
+
+:root[data-color-theme="lavender"] {
+  --background: oklch(0.986 0.008 300);
+  --primary: oklch(0.52 0.2 295);
+  --primary-foreground: oklch(0.99 0.005 300);
+  --secondary: oklch(0.94 0.035 300);
+  --secondary-foreground: oklch(0.3 0.08 295);
+  --accent: oklch(0.95 0.04 300);
+  --accent-foreground: oklch(0.3 0.08 295);
+  --ring: oklch(0.67 0.16 295);
+  --sidebar-primary: oklch(0.52 0.2 295);
+  --sidebar-accent: oklch(0.95 0.04 300);
+}
+
+.dark[data-color-theme="lavender"] {
+  --background: oklch(0.18 0.025 295);
+  --card: oklch(0.22 0.03 295);
+  --popover: oklch(0.22 0.03 295);
+  --primary: oklch(0.73 0.15 295);
+  --primary-foreground: oklch(0.2 0.04 295);
+  --secondary: oklch(0.3 0.045 295);
+  --secondary-foreground: oklch(0.95 0.025 300);
+  --muted: oklch(0.27 0.035 295);
+  --accent: oklch(0.31 0.05 295);
+  --accent-foreground: oklch(0.95 0.025 300);
+  --ring: oklch(0.68 0.15 295);
+  --sidebar: oklch(0.2 0.03 295);
+  --sidebar-primary: oklch(0.73 0.15 295);
+  --sidebar-accent: oklch(0.31 0.05 295);
+}
+
+:root[data-color-theme="forest"] {
+  --background: oklch(0.985 0.012 150);
+  --primary: oklch(0.48 0.13 150);
+  --primary-foreground: oklch(0.99 0.005 150);
+  --secondary: oklch(0.93 0.04 150);
+  --secondary-foreground: oklch(0.28 0.07 150);
+  --accent: oklch(0.94 0.05 150);
+  --accent-foreground: oklch(0.28 0.07 150);
+  --ring: oklch(0.63 0.14 150);
+  --sidebar-primary: oklch(0.48 0.13 150);
+  --sidebar-accent: oklch(0.94 0.05 150);
+}
+
+.dark[data-color-theme="forest"] {
+  --background: oklch(0.18 0.025 155);
+  --card: oklch(0.22 0.03 155);
+  --popover: oklch(0.22 0.03 155);
+  --primary: oklch(0.72 0.13 150);
+  --primary-foreground: oklch(0.2 0.04 155);
+  --secondary: oklch(0.3 0.045 155);
+  --secondary-foreground: oklch(0.95 0.025 150);
+  --muted: oklch(0.27 0.035 155);
+  --accent: oklch(0.31 0.05 150);
+  --accent-foreground: oklch(0.95 0.025 150);
+  --ring: oklch(0.66 0.13 150);
+  --sidebar: oklch(0.2 0.03 155);
+  --sidebar-primary: oklch(0.72 0.13 150);
+  --sidebar-accent: oklch(0.31 0.05 150);
+}
+
+:root[data-color-theme="sunset"] {
+  --background: oklch(0.99 0.012 65);
+  --primary: oklch(0.53 0.16 45);
+  --primary-foreground: oklch(0.99 0.005 65);
+  --secondary: oklch(0.95 0.045 65);
+  --secondary-foreground: oklch(0.32 0.08 45);
+  --accent: oklch(0.95 0.055 60);
+  --accent-foreground: oklch(0.32 0.08 45);
+  --ring: oklch(0.68 0.16 45);
+  --sidebar-primary: oklch(0.53 0.16 45);
+  --sidebar-accent: oklch(0.95 0.055 60);
+}
+
+.dark[data-color-theme="sunset"] {
+  --background: oklch(0.19 0.025 45);
+  --card: oklch(0.23 0.03 45);
+  --popover: oklch(0.23 0.03 45);
+  --primary: oklch(0.76 0.14 55);
+  --primary-foreground: oklch(0.22 0.04 45);
+  --secondary: oklch(0.31 0.045 50);
+  --secondary-foreground: oklch(0.96 0.025 60);
+  --muted: oklch(0.28 0.035 45);
+  --accent: oklch(0.32 0.05 50);
+  --accent-foreground: oklch(0.96 0.025 60);
+  --ring: oklch(0.7 0.14 55);
+  --sidebar: oklch(0.21 0.03 45);
+  --sidebar-primary: oklch(0.76 0.14 55);
+  --sidebar-accent: oklch(0.32 0.05 50);
+}
+
+:root[data-color-theme="rose"] {
+  --background: oklch(0.988 0.01 10);
+  --primary: oklch(0.52 0.18 10);
+  --primary-foreground: oklch(0.99 0.005 10);
+  --secondary: oklch(0.945 0.04 10);
+  --secondary-foreground: oklch(0.3 0.08 10);
+  --accent: oklch(0.95 0.05 10);
+  --accent-foreground: oklch(0.3 0.08 10);
+  --ring: oklch(0.66 0.17 10);
+  --sidebar-primary: oklch(0.52 0.18 10);
+  --sidebar-accent: oklch(0.95 0.05 10);
+}
+
+.dark[data-color-theme="rose"] {
+  --background: oklch(0.18 0.025 10);
+  --card: oklch(0.22 0.03 10);
+  --popover: oklch(0.22 0.03 10);
+  --primary: oklch(0.73 0.14 10);
+  --primary-foreground: oklch(0.2 0.04 10);
+  --secondary: oklch(0.3 0.045 10);
+  --secondary-foreground: oklch(0.95 0.025 10);
+  --muted: oklch(0.27 0.035 10);
+  --accent: oklch(0.31 0.05 10);
+  --accent-foreground: oklch(0.95 0.025 10);
+  --ring: oklch(0.67 0.14 10);
+  --sidebar: oklch(0.2 0.03 10);
+  --sidebar-primary: oklch(0.73 0.14 10);
+  --sidebar-accent: oklch(0.31 0.05 10);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -127,6 +277,52 @@
   html {
     @apply font-sans;
   }
+}
+
+.note-editor-scroll .tableWrapper {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 1.25rem 0;
+}
+
+.note-editor-scroll .ProseMirror table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.note-editor-scroll .ProseMirror th,
+.note-editor-scroll .ProseMirror td {
+  position: relative;
+  min-width: 6rem;
+  border: 1px solid color-mix(in oklab, var(--border) 80%, var(--foreground) 20%);
+  padding: 0.5rem 0.625rem;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.note-editor-scroll .ProseMirror th:not([style*="background-color"]) {
+  background-color: var(--muted);
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.note-editor-scroll .ProseMirror .column-resize-handle {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  right: -3px;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  background-color: var(--primary);
+  opacity: 0.35;
+}
+
+.note-editor-scroll .ProseMirror .column-resize-handle:hover,
+.note-editor-scroll .ProseMirror .column-resize-dragging {
+  opacity: 1;
 }
 
 @media print {

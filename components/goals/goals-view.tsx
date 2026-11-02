@@ -1,29 +1,85 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect, useId } from "react"
 import {
   Plus,
   Target,
-  TrendingUp,
-  Calendar,
   Flag,
-  MoreHorizontal,
   Edit,
   Trash2,
-  ChevronDown,
   Check,
   Award,
-  ArrowUpRight,
   X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { ConfirmAction } from "@/components/ui/confirm-action"
 import { Input } from "@/components/ui/input"
+import { loadUserData, removeUserData, saveUserData } from "@/lib/user-data"
 import { Progress } from "@/components/ui/progress"
 import { cn } from "@/lib/utils"
-import { formatDueDate } from "@/lib/format"
-import type { Goal } from "@/lib/types"
+import type { Goal, GoalProgressEntry } from "@/lib/types"
 
 const horizonOrder = ["Week", "Month", "Quarter", "Semester", "Year", "Custom"]
+const GOALS_STORAGE_KEY = "productivity-hub-goals-v1"
+
+function getCurrentValue(goal: Goal): number {
+  return goal.progressEntries?.length
+    ? goal.progressEntries.reduce((total, entry) => total + entry.amount, 0)
+    : goal.currentValue ?? 0
+}
+
+function getProgress(currentValue: number, targetValue: number): number {
+  return targetValue > 0 ? Math.min(100, Math.round((currentValue / targetValue) * 100)) : 0
+}
+
+function isProgressEntry(value: unknown): value is GoalProgressEntry {
+  if (!value || typeof value !== "object") return false
+  const entry = value as Record<string, unknown>
+  return typeof entry.id === "string" &&
+    typeof entry.amount === "number" &&
+    Number.isFinite(entry.amount) &&
+    entry.amount > 0 &&
+    typeof entry.note === "string" &&
+    typeof entry.loggedAt === "string" &&
+    !Number.isNaN(Date.parse(entry.loggedAt))
+}
+
+function normalizeGoal(value: unknown): Goal | null {
+  if (!value || typeof value !== "object") return null
+  const goal = value as Record<string, unknown>
+  if (
+    typeof goal.id !== "string" ||
+    typeof goal.title !== "string" ||
+    typeof goal.horizon !== "string" ||
+    typeof goal.target !== "string" ||
+    typeof goal.progress !== "number" ||
+    !Number.isFinite(goal.progress)
+  ) return null
+
+  const entries = Array.isArray(goal.progressEntries) ? goal.progressEntries : []
+  if (!entries.every(isProgressEntry)) return null
+  const targetValue = typeof goal.targetValue === "number" && Number.isFinite(goal.targetValue) && goal.targetValue > 0
+    ? goal.targetValue
+    : undefined
+  const measureUnit = typeof goal.measureUnit === "string" ? goal.measureUnit.trim() : ""
+  const currentValue = entries.length
+    ? entries.reduce((total, entry) => total + entry.amount, 0)
+    : typeof goal.currentValue === "number" && Number.isFinite(goal.currentValue)
+      ? Math.max(0, goal.currentValue)
+      : 0
+
+  return {
+    id: goal.id,
+    title: goal.title,
+    horizon: goal.horizon,
+    target: goal.target,
+    targetValue,
+    measureUnit,
+    currentValue,
+    progressEntries: entries,
+    progress: targetValue && measureUnit ? getProgress(currentValue, targetValue) : 0,
+  }
+}
 
 export function GoalsView({
   goals: initialGoals,
@@ -44,7 +100,51 @@ export function GoalsView({
   const [newGoalTitle, setNewGoalTitle] = useState("")
   const [newGoalHorizon, setNewGoalHorizon] = useState("Quarter")
   const [newGoalTarget, setNewGoalTarget] = useState("")
-  const [newGoalProgress, setNewGoalProgress] = useState(0)
+  const [newGoalTargetValue, setNewGoalTargetValue] = useState("1")
+  const [newGoalMeasureUnit, setNewGoalMeasureUnit] = useState("steps")
+  const [storageReady, setStorageReady] = useState(false)
+  const [storageLoadFailed, setStorageLoadFailed] = useState(false)
+  const [storageError, setStorageError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const parsed = await loadUserData<unknown>(GOALS_STORAGE_KEY)
+          if (parsed !== null) {
+          if (!Array.isArray(parsed)) throw new Error("Saved goal data is not a goal list.")
+          const normalized = parsed.map(normalizeGoal)
+          if (normalized.some((goal) => goal === null)) throw new Error("Saved goal data contains an invalid goal.")
+            if (active) setGoals(normalized.filter((goal): goal is Goal => goal !== null))
+          } else if (active) {
+            setGoals(initialGoals.map((goal) => normalizeGoal(goal) ?? goal))
+          }
+        } catch (error) {
+          if (active) {
+            setStorageLoadFailed(true)
+            setStorageError(error instanceof Error ? error.message : "Could not load saved goals.")
+          }
+        } finally {
+          if (active) setStorageReady(true)
+        }
+      })()
+    }, 0)
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [initialGoals])
+
+  useEffect(() => {
+    if (!storageReady || storageLoadFailed) return
+    const timer = window.setTimeout(() => {
+      void saveUserData(GOALS_STORAGE_KEY, goals)
+        .then(() => setStorageError(null))
+        .catch((error: unknown) => setStorageError(error instanceof Error ? error.message : "Could not save goals."))
+    }, 100)
+    return () => window.clearTimeout(timer)
+  }, [goals, storageLoadFailed, storageReady])
 
   const filteredGoals = useMemo(() => {
     return goals
@@ -69,19 +169,26 @@ export function GoalsView({
     : 0
 
   const handleAddGoal = () => {
-    if (!newGoalTitle.trim()) return
+    const targetValue = Number(newGoalTargetValue)
+    const measureUnit = newGoalMeasureUnit.trim()
+    if (!newGoalTitle.trim() || !Number.isFinite(targetValue) || targetValue <= 0 || !measureUnit) return
     const newGoal: Goal = {
       id: `goal-${crypto.randomUUID()}`,
       title: newGoalTitle.trim(),
       horizon: newGoalHorizon,
-      progress: newGoalProgress,
+      progress: 0,
       target: newGoalTarget.trim(),
+      targetValue,
+      measureUnit,
+      currentValue: 0,
+      progressEntries: [],
     }
     setGoals((current) => [newGoal, ...current])
     onAddGoal?.(newGoal)
     setNewGoalTitle("")
     setNewGoalTarget("")
-    setNewGoalProgress(0)
+    setNewGoalTargetValue("1")
+    setNewGoalMeasureUnit("steps")
     setShowAddModal(false)
   }
 
@@ -92,27 +199,43 @@ export function GoalsView({
   }
 
   const handleDeleteGoal = (id: string) => {
-    if (confirm("Are you sure you want to delete this goal?")) {
-      setGoals((current) => current.filter((g) => g.id !== id))
-      onDeleteGoal?.(id)
-    }
+    setGoals((current) => current.filter((g) => g.id !== id))
+    onDeleteGoal?.(id)
   }
 
-  const handleProgressChange = (goal: Goal, progress: number) => {
-    const clamped = Math.min(100, Math.max(0, progress))
-    handleUpdateGoal(goal.id, { progress: clamped })
+  const restoreStarterGoals = () => {
+    void removeUserData(GOALS_STORAGE_KEY).then(() => {
+      setGoals(initialGoals.map((goal) => normalizeGoal(goal) ?? goal))
+      setStorageLoadFailed(false)
+      setStorageError(null)
+    }).catch((error: unknown) => setStorageError(error instanceof Error ? error.message : "Could not restore starter goals."))
   }
 
-  const getHorizonColor = (horizon: string) => {
-    const colors: Record<string, string> = {
-      Week: "bg-purple-500",
-      Month: "bg-blue-500",
-      Quarter: "bg-orange-500",
-      Semester: "bg-green-500",
-      Year: "bg-red-500",
-      Custom: "bg-gray-500",
+  const handleLogProgress = (goal: Goal, amount: number, note: string) => {
+    if (!Number.isFinite(amount) || amount <= 0 || !goal.targetValue || !goal.measureUnit) return
+    const currentValue = getCurrentValue(goal)
+    const entry: GoalProgressEntry = {
+      id: `goal-log-${crypto.randomUUID()}`,
+      amount,
+      note: note.trim(),
+      loggedAt: new Date().toISOString(),
     }
-    return colors[horizon] || "bg-gray-500"
+    const progressEntries = [...(goal.progressEntries ?? [])]
+    if (progressEntries.length === 0 && currentValue > 0) {
+      progressEntries.push({
+        id: `goal-log-${crypto.randomUUID()}`,
+        amount: currentValue,
+        note: "Starting value",
+        loggedAt: new Date().toISOString(),
+      })
+    }
+    progressEntries.push(entry)
+    const nextValue = currentValue + amount
+    handleUpdateGoal(goal.id, {
+      currentValue: nextValue,
+      progressEntries,
+      progress: getProgress(nextValue, goal.targetValue),
+    })
   }
 
   const getHorizonBg = (horizon: string) => {
@@ -136,6 +259,16 @@ export function GoalsView({
             {goals.length} goal{goals.length !== 1 ? "s" : ""} • {activeGoals.length} active • {completedGoals.length} completed
           </p>
         </div>
+        {storageError && (
+          <div role="status" className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+            {storageError}
+            {storageLoadFailed && (
+              <Button type="button" variant="outline" size="sm" className="ml-3" onClick={restoreStarterGoals}>
+                Restore starter goals
+              </Button>
+            )}
+          </div>
+        )}
         <Button onClick={() => setShowAddModal(true)}>
           <Plus className="size-3.5 mr-1.5" />
           New Goal
@@ -195,16 +328,16 @@ export function GoalsView({
             <GoalCard
               key={goal.id}
               goal={goal}
-              onProgressChange={(progress) => handleProgressChange(goal, progress)}
+              onLogProgress={(amount, note) => handleLogProgress(goal, amount, note)}
               onEdit={() => {
                 setEditingGoal(goal)
                 setNewGoalTitle(goal.title)
                 setNewGoalHorizon(goal.horizon)
                 setNewGoalTarget(goal.target)
-                setNewGoalProgress(goal.progress)
+                setNewGoalTargetValue(String(goal.targetValue ?? 1))
+                setNewGoalMeasureUnit(goal.measureUnit || "steps")
               }}
               onDelete={() => handleDeleteGoal(goal.id)}
-              getHorizonColor={getHorizonColor}
               getHorizonBg={getHorizonBg}
             />
           ))}
@@ -227,16 +360,16 @@ export function GoalsView({
               <GoalListItem
                 key={goal.id}
                 goal={goal}
-                onProgressChange={(progress) => handleProgressChange(goal, progress)}
+                onLogProgress={(amount, note) => handleLogProgress(goal, amount, note)}
                 onEdit={() => {
                   setEditingGoal(goal)
-                  setNewGoalTitle(goal.title)
+                    setNewGoalTitle(goal.title)
                   setNewGoalHorizon(goal.horizon)
                   setNewGoalTarget(goal.target)
-                  setNewGoalProgress(goal.progress)
+                  setNewGoalTargetValue(String(goal.targetValue ?? 1))
+                  setNewGoalMeasureUnit(goal.measureUnit || "steps")
                 }}
                 onDelete={() => handleDeleteGoal(goal.id)}
-                getHorizonColor={getHorizonColor}
                 getHorizonBg={getHorizonBg}
               />
             ))}
@@ -293,17 +426,23 @@ export function GoalsView({
                 setEditingGoal(null)
                 setNewGoalTitle("")
                 setNewGoalTarget("")
-                setNewGoalProgress(0)
+                setNewGoalTargetValue("1")
+                setNewGoalMeasureUnit("steps")
               }}>
                 <X className="size-4" />
               </Button>
             </div>
             <div className="p-4 space-y-4">
-              <Input
-                value={newGoalTitle}
-                onChange={(e) => setNewGoalTitle(e.target.value)}
-                placeholder="Goal title (e.g., Run a marathon)"
-              />
+              <label className="block space-y-1.5 text-sm">
+                <span className="font-medium">Goal</span>
+                <Input
+                  required
+                  maxLength={120}
+                  value={newGoalTitle}
+                  onChange={(e) => setNewGoalTitle(e.target.value)}
+                  placeholder="e.g. Complete my biology revision"
+                />
+              </label>
               <select
                 value={newGoalHorizon}
                 onChange={(e) => setNewGoalHorizon(e.target.value)}
@@ -316,38 +455,69 @@ export function GoalsView({
                 <option value="Year">Year</option>
                 <option value="Custom">Custom</option>
               </select>
-              <Input
-                value={newGoalTarget}
-                onChange={(e) => setNewGoalTarget(e.target.value)}
-                placeholder="Target (e.g., 42.2 km, $10,000, 100 books)"
-              />
-              <div>
-                <label className="block text-sm font-medium mb-2">Progress: {newGoalProgress}%</label>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  value={newGoalProgress}
-                  onChange={(e) => setNewGoalProgress(Number(e.target.value))}
-                  className="w-full h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
+              <label className="block space-y-1.5 text-sm">
+                <span className="font-medium">Measure</span>
+                <Input
+                  required
+                  maxLength={32}
+                  value={newGoalMeasureUnit}
+                  onChange={(e) => setNewGoalMeasureUnit(e.target.value)}
+                  placeholder="e.g. study sessions, pages, dollars"
                 />
-              </div>
+              </label>
+              <label className="block space-y-1.5 text-sm">
+                <span className="font-medium">Target amount</span>
+                <Input
+                  required
+                  type="number"
+                  min="0.01"
+                  step="any"
+                  value={newGoalTargetValue}
+                  onChange={(e) => setNewGoalTargetValue(e.target.value)}
+                />
+              </label>
+              <label className="block space-y-1.5 text-sm">
+                <span className="font-medium">Definition of done (optional)</span>
+                <Input
+                  maxLength={160}
+                  value={newGoalTarget}
+                  onChange={(e) => setNewGoalTarget(e.target.value)}
+                  placeholder="What does success look like?"
+                />
+              </label>
               <div className="flex justify-end gap-2 pt-4 border-t border-border">
                 <Button variant="outline" onClick={() => {
                   setShowAddModal(false)
                   setEditingGoal(null)
                   setNewGoalTitle("")
                   setNewGoalTarget("")
-                  setNewGoalProgress(0)
+                  setNewGoalTargetValue("1")
+                  setNewGoalMeasureUnit("steps")
                 }}>
                   Cancel
                 </Button>
-                <Button onClick={editingGoal ? () => handleUpdateGoal(editingGoal.id, {
-                  title: newGoalTitle,
-                  horizon: newGoalHorizon,
-                  target: newGoalTarget,
-                  progress: newGoalProgress,
-                }) : handleAddGoal}>
+                <Button
+                  type="button"
+                  onClick={() => {
+                    const targetValue = Number(newGoalTargetValue)
+                    const measureUnit = newGoalMeasureUnit.trim()
+                    if (!newGoalTitle.trim() || !Number.isFinite(targetValue) || targetValue <= 0 || !measureUnit) return
+                    if (editingGoal) {
+                      const currentValue = getCurrentValue(editingGoal)
+                      handleUpdateGoal(editingGoal.id, {
+                        title: newGoalTitle.trim(),
+                        horizon: newGoalHorizon,
+                        target: newGoalTarget.trim(),
+                        targetValue,
+                        measureUnit,
+                        currentValue,
+                        progress: getProgress(currentValue, targetValue),
+                      })
+                    } else {
+                      handleAddGoal()
+                    }
+                  }}
+                >
                   {editingGoal ? "Save Changes" : "Create Goal"}
                 </Button>
               </div>
@@ -361,21 +531,18 @@ export function GoalsView({
 
 function GoalCard({
   goal,
-  onProgressChange,
+  onLogProgress,
   onEdit,
   onDelete,
-  getHorizonColor,
   getHorizonBg,
 }: {
   goal: Goal
-  onProgressChange: (progress: number) => void
+  onLogProgress: (amount: number, note: string) => void
   onEdit: () => void
   onDelete: () => void
-  getHorizonColor: (horizon: string) => string
   getHorizonBg: (horizon: string) => string
 }) {
   const isCompleted = goal.progress >= 100
-  const horizonColor = getHorizonColor(goal.horizon)
   const horizonBg = getHorizonBg(goal.horizon)
 
   return (
@@ -391,9 +558,17 @@ function GoalCard({
           <Button variant="ghost" size="icon-xs" onClick={onEdit} aria-label="Edit goal">
             <Edit className="size-3.5" />
           </Button>
-          <Button variant="ghost" size="icon-xs" onClick={onDelete} aria-label="Delete goal">
-            <Trash2 className="size-3.5" />
-          </Button>
+          <ConfirmAction
+            title="Delete goal?"
+            description={`Delete “${goal.title}”? This cannot be undone.`}
+            onConfirm={onDelete}
+          >
+            {(openConfirmation) => (
+              <Button variant="ghost" size="icon-xs" onClick={openConfirmation} aria-label="Delete goal">
+                <Trash2 className="size-3.5" />
+              </Button>
+            )}
+          </ConfirmAction>
         </div>
       </div>
 
@@ -414,7 +589,7 @@ function GoalCard({
           <div className="flex items-center justify-between text-sm">
             <span className="text-muted-foreground flex items-center gap-1">
               <Flag className="size-3.5" />
-              {goal.target}
+              {goal.target || "Measurable target"}
             </span>
             {isCompleted && (
               <span className="flex items-center gap-1 text-green-600 dark:text-green-400 font-medium">
@@ -426,20 +601,18 @@ function GoalCard({
         </div>
 
         <div className="pt-3 border-t border-border">
-          <div className="flex items-center gap-2">
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={goal.progress}
-              onChange={(e) => onProgressChange(Number(e.target.value))}
-              className="flex-1 h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
-              disabled={isCompleted}
-            />
-            {isCompleted && (
-              <Award className="size-5 text-yellow-500 shrink-0" />
-            )}
-          </div>
+          {goal.targetValue && goal.measureUnit ? (
+            <>
+              <p className="mb-2 text-sm text-muted-foreground">
+                {getCurrentValue(goal)} / {goal.targetValue} {goal.measureUnit}
+              </p>
+              <GoalProgressEntryForm unit={goal.measureUnit} onLog={onLogProgress} />
+              <GoalProgressHistory entries={goal.progressEntries ?? []} />
+            </>
+          ) : (
+            <p className="text-sm text-muted-foreground">Edit this goal to set a measurable target.</p>
+          )}
+          {isCompleted && <Award className="mt-2 size-5 text-yellow-500" />}
         </div>
       </div>
     </div>
@@ -448,44 +621,43 @@ function GoalCard({
 
 function GoalListItem({
   goal,
-  onProgressChange,
+  onLogProgress,
   onEdit,
   onDelete,
-  getHorizonColor,
   getHorizonBg,
 }: {
   goal: Goal
-  onProgressChange: (progress: number) => void
+  onLogProgress: (amount: number, note: string) => void
   onEdit: () => void
   onDelete: () => void
-  getHorizonColor: (horizon: string) => string
   getHorizonBg: (horizon: string) => string
 }) {
-  const isCompleted = goal.progress >= 100
   const horizonBg = getHorizonBg(goal.horizon)
 
   return (
-    <li className={cn("px-4 py-4 hover:bg-muted/50 transition-colors", isCompleted && "opacity-60")}>
-      <div className="flex items-center gap-4">
+    <li className={cn("px-4 py-4 hover:bg-muted/50 transition-colors", goal.progress >= 100 && "opacity-60")}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap mb-1">
-            <h4 className={cn("font-medium truncate", isCompleted && "line-through text-muted-foreground")}>
+            <h4 className={cn("font-medium truncate", goal.progress >= 100 && "line-through text-muted-foreground")}>
               {goal.title}
             </h4>
             <span className={cn("px-2 py-0.5 rounded-full text-xs font-medium", horizonBg)}>
               {goal.horizon}
             </span>
-            {isCompleted && (
+            {goal.progress >= 100 && (
               <span className="flex items-center gap-1 text-green-600 dark:text-green-400 font-medium text-sm">
                 <Check className="size-3.5" />
                 Completed
               </span>
             )}
           </div>
-          <p className="text-sm text-muted-foreground">Target: {goal.target}</p>
+          <p className="text-sm text-muted-foreground">
+            {goal.target || "Target"}{goal.targetValue && goal.measureUnit ? ` · ${getCurrentValue(goal)} / ${goal.targetValue} ${goal.measureUnit}` : " · Set a measurable target"}
+          </p>
         </div>
 
-        <div className="w-40 flex-shrink-0">
+        <div className="w-full flex-shrink-0 sm:w-40">
           <div className="flex items-center justify-between text-sm mb-1">
             <span className="text-muted-foreground">Progress</span>
             <span className="font-medium tabular-nums">{goal.progress}%</span>
@@ -494,23 +666,93 @@ function GoalListItem({
         </div>
 
         <div className="flex items-center gap-1">
-          <input
-            type="range"
-            min="0"
-            max="100"
-            value={goal.progress}
-            onChange={(e) => onProgressChange(Number(e.target.value))}
-            className="flex-1 h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary max-w-xs"
-            disabled={isCompleted}
-          />
           <Button variant="ghost" size="icon-sm" onClick={onEdit} aria-label="Edit goal">
             <Edit className="size-4" />
           </Button>
-          <Button variant="ghost" size="icon-sm" onClick={onDelete} aria-label="Delete goal">
-            <Trash2 className="size-4" />
-          </Button>
+          <ConfirmAction
+            title="Delete goal?"
+            description={`Delete “${goal.title}”? This cannot be undone.`}
+            onConfirm={onDelete}
+          >
+            {(openConfirmation) => (
+              <Button variant="ghost" size="icon-sm" onClick={openConfirmation} aria-label="Delete goal">
+                <Trash2 className="size-4" />
+              </Button>
+            )}
+          </ConfirmAction>
         </div>
       </div>
+      {goal.targetValue && goal.measureUnit && (
+        <div className="mt-3 max-w-xl">
+          <GoalProgressEntryForm unit={goal.measureUnit} onLog={onLogProgress} />
+          <GoalProgressHistory entries={goal.progressEntries ?? []} />
+        </div>
+      )}
     </li>
+  )
+}
+
+function GoalProgressEntryForm({
+  unit,
+  onLog,
+}: {
+  unit: string
+  onLog: (amount: number, note: string) => void
+}) {
+  const [amount, setAmount] = useState("")
+  const [note, setNote] = useState("")
+  const id = useId()
+
+  const submit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const parsedAmount = Number(amount)
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) return
+    onLog(parsedAmount, note)
+    setAmount("")
+    setNote("")
+  }
+
+  return (
+    <form onSubmit={submit} className="flex flex-wrap items-center gap-2">
+      <label className="sr-only" htmlFor={`${id}-amount`}>Amount of {unit} completed</label>
+      <Input
+        id={`${id}-amount`}
+        type="number"
+        min="0.01"
+        step="any"
+        required
+        value={amount}
+        onChange={(event) => setAmount(event.target.value)}
+        placeholder={`Add ${unit}`}
+        className="w-28"
+      />
+      <Input
+        value={note}
+        onChange={(event) => setNote(event.target.value)}
+        maxLength={120}
+        placeholder="What did you do? (optional)"
+        aria-label="Progress note"
+        className="min-w-36 flex-1"
+      />
+      <Button type="submit" size="sm">Log progress</Button>
+    </form>
+  )
+}
+
+function GoalProgressHistory({ entries }: { entries: GoalProgressEntry[] }) {
+  const recentEntries = entries.slice(-3).reverse()
+  if (recentEntries.length === 0) return null
+
+  return (
+    <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+      {recentEntries.map((entry) => (
+        <li key={entry.id} className="flex items-baseline justify-between gap-2">
+          <span className="truncate">{entry.note || "Progress logged"}</span>
+          <time className="shrink-0" dateTime={entry.loggedAt}>
+            {new Date(entry.loggedAt).toLocaleDateString()}
+          </time>
+        </li>
+      ))}
+    </ul>
   )
 }

@@ -1,6 +1,7 @@
 import type { LucideIcon } from "lucide-react"
 import {
   CalendarDays,
+  BookOpenCheck,
   CheckSquare,
   FolderKanban,
   Gauge,
@@ -26,6 +27,7 @@ export const primaryNav: NavItem[] = [
   { href: "/notes", label: "Notes", icon: NotebookPen },
   { href: "/habits", label: "Habits", icon: Repeat },
   { href: "/goals", label: "Goals", icon: Target },
+  { href: "/study", label: "Study Tracker", icon: BookOpenCheck },
   { href: "/insights", label: "Insights", icon: LineChart },
 ]
 
@@ -71,6 +73,11 @@ export const moduleCopy: Record<
     title: "Insights",
     description:
       "Local analytics across tasks, habits, and goals will appear in this view.",
+  },
+  "/study": {
+    title: "SAC & exam tracker",
+    description:
+      "Track assessment results, exam dates, study sessions, and spaced-repetition reviews.",
   },
   "/settings": {
     title: "Settings",

@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Hub",
-  description: "A personal operating system for tasks, notes, habits, and goals.",
+  description: "A personal hub for tasks, notes, schedules, goals, and study tracking.",
 }
 
 function ShellFallback() {

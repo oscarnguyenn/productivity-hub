@@ -29,6 +29,8 @@ import {
   ChevronDown,
   Code,
   Download,
+  Maximize2,
+  Minimize2,
   Highlighter,
   Image as ImageIcon,
   Italic,
@@ -38,6 +40,7 @@ import {
   Minus,
   Plus,
   Printer,
+  Paintbrush,
   Quote,
   Redo,
   Search,
@@ -55,6 +58,53 @@ import { cn } from "@/lib/utils"
 const lowlight = createLowlight(common)
 const documentMenus = ["File", "Edit", "View", "Insert", "Format", "Tools", "Extensions", "Help"] as const
 const fontFamilies = ["Arial", "Georgia", "Times New Roman", "Verdana", "Courier New"]
+const highlightColors = [
+  { name: "Yellow", value: "#fff176" },
+  { name: "Lime", value: "#c5e1a5" },
+  { name: "Mint", value: "#a7f3d0" },
+  { name: "Cyan", value: "#a5f3fc" },
+  { name: "Sky blue", value: "#bae6fd" },
+  { name: "Lavender", value: "#ddd6fe" },
+  { name: "Pink", value: "#fbcfe8" },
+  { name: "Rose", value: "#fecaca" },
+  { name: "Orange", value: "#fed7aa" },
+  { name: "Gold", value: "#fde68a" },
+  { name: "Light gray", value: "#e5e7eb" },
+  { name: "White", value: "#ffffff" },
+]
+const cellColors = [
+  { name: "No fill", value: "" },
+  { name: "Light gray", value: "#f1f5f9" },
+  { name: "Slate", value: "#cbd5e1" },
+  { name: "Red", value: "#fecaca" },
+  { name: "Orange", value: "#fed7aa" },
+  { name: "Yellow", value: "#fef08a" },
+  { name: "Green", value: "#bbf7d0" },
+  { name: "Teal", value: "#99f6e4" },
+  { name: "Blue", value: "#bfdbfe" },
+  { name: "Indigo", value: "#c7d2fe" },
+  { name: "Violet", value: "#ddd6fe" },
+  { name: "Pink", value: "#fbcfe8" },
+]
+const MAX_TABLE_CELLS = 2500
+
+function withCellBackground(extension: typeof TableCell | typeof TableHeader) {
+  return extension.extend({
+    addAttributes() {
+      return {
+        ...this.parent?.(),
+        backgroundColor: {
+          default: null,
+          parseHTML: (element) => element.style.backgroundColor || null,
+          renderHTML: (attributes) =>
+            attributes.backgroundColor
+              ? { style: `background-color: ${attributes.backgroundColor}` }
+              : {},
+        },
+      }
+    },
+  })
+}
 
 const StyledText = TextStyle.extend({
   addAttributes() {
@@ -91,6 +141,8 @@ interface TiptapEditorProps {
   readOnly?: boolean
   onNewDocument?: () => void
   title?: string
+  focusMode?: boolean
+  onToggleFocus?: () => void
 }
 
 function MenuButton({
@@ -138,6 +190,8 @@ export function TiptapEditor({
   readOnly = false,
   onNewDocument,
   title = "Untitled document",
+  focusMode = false,
+  onToggleFocus,
 }: TiptapEditorProps) {
   const [activeMenu, setActiveMenu] = useState<string | null>(null)
   const [dialog, setDialog] = useState<DocumentDialog>(null)
@@ -149,6 +203,12 @@ export function TiptapEditor({
   const [spellcheckEnabled, setSpellcheckEnabled] = useState(true)
   const [selectedFontSize, setSelectedFontSize] = useState("12")
   const [toolbarRevision, setToolbarRevision] = useState(0)
+  const [showTableDialog, setShowTableDialog] = useState(false)
+  const [tableSizeError, setTableSizeError] = useState<string | null>(null)
+  const [tableRows, setTableRows] = useState("3")
+  const [tableColumns, setTableColumns] = useState("3")
+  const [showHighlightPalette, setShowHighlightPalette] = useState(false)
+  const [showCellPalette, setShowCellPalette] = useState(false)
 
   const editor = useEditor({
     extensions: [
@@ -164,10 +224,10 @@ export function TiptapEditor({
       Image.configure({
         HTMLAttributes: { class: "max-w-full rounded-lg" },
       }),
-      Table.configure({ resizable: true }),
+      Table.configure({ resizable: true, cellMinWidth: 96, handleWidth: 8 }),
       TableRow,
-      TableCell,
-      TableHeader,
+      withCellBackground(TableCell),
+      withCellBackground(TableHeader),
       TaskList,
       TaskItem.configure({ nested: true }),
       CodeBlockLowlight.configure({ lowlight }),
@@ -237,10 +297,30 @@ export function TiptapEditor({
     setActiveMenu(null)
   }, [editor])
 
-  const addTable = useCallback(() => {
-    editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
+  const openTableDialog = useCallback(() => {
+    setTableSizeError(null)
+    setShowTableDialog(true)
     setActiveMenu(null)
-  }, [editor])
+  }, [])
+
+  const insertTable = useCallback(() => {
+    const rows = Number(tableRows)
+    const cols = Number(tableColumns)
+    if (!editor || !Number.isSafeInteger(rows) || !Number.isSafeInteger(cols) || rows < 1 || cols < 1) {
+      setTableSizeError("Enter a whole number greater than zero for rows and columns.")
+      return
+    }
+    if (rows * cols > MAX_TABLE_CELLS) {
+      setTableSizeError(`Tables are limited to ${MAX_TABLE_CELLS.toLocaleString()} cells to keep editing responsive.`)
+      return
+    }
+    if (!editor.chain().focus().insertTable({ rows, cols, withHeaderRow: true }).run()) {
+      setTableSizeError("The table could not be inserted at the current cursor position.")
+      return
+    }
+    setShowTableDialog(false)
+    setTableSizeError(null)
+  }, [editor, tableColumns, tableRows])
 
   const findNextMatch = useCallback(() => {
     if (!editor || !findQuery.trim()) {
@@ -338,11 +418,12 @@ export function TiptapEditor({
       { label: "Zoom in", action: () => setZoom((value) => Math.min(200, value + 10)) },
       { label: "Zoom out", action: () => setZoom((value) => Math.max(50, value - 10)) },
       { label: readingMode ? "Exit reading mode" : "Reading mode", action: () => setReadingMode((value) => !value) },
+      { label: focusMode ? "Exit focus view" : "Focus view", action: () => onToggleFocus?.() },
     ],
     Insert: [
       { label: "Link", shortcut: "Ctrl+K", action: openLinkDialog, disabled: isReadOnly },
       { label: "Image from URL", action: addImage, disabled: isReadOnly },
-      { label: "Table (3 × 3)", action: addTable, disabled: isReadOnly },
+      { label: "Insert table…", action: openTableDialog, disabled: isReadOnly },
       { label: "Checklist", action: () => editor?.chain().focus().toggleTaskList().run(), disabled: isReadOnly },
       { label: "Horizontal line", action: () => editor?.chain().focus().setHorizontalRule().run(), disabled: isReadOnly },
     ],
@@ -380,11 +461,11 @@ export function TiptapEditor({
         : ""
 
   return (
-    <div data-editor-revision={toolbarRevision} className="note-document-print flex min-h-0 flex-1 flex-col overflow-hidden bg-muted/40">
+    <div data-editor-revision={toolbarRevision} className="note-document-print flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-muted/40">
       <h1 className="print-document-title hidden">{title}</h1>
-      <div className="note-editor-menu flex items-center gap-0.5 border-b border-border bg-card px-3 py-1 text-sm">
+      <div className="note-editor-menu flex flex-wrap items-center gap-0.5 border-b border-border bg-card px-3 py-1 text-sm">
         {documentMenus.map((menu) => (
-          <div key={menu} className="relative">
+          <div key={menu} className="relative shrink-0">
             <Button
               type="button"
               variant={activeMenu === menu ? "secondary" : "ghost"}
@@ -422,6 +503,16 @@ export function TiptapEditor({
           </Button>
           <Button type="button" variant="ghost" size="icon-sm" title="Print document" onClick={() => window.print()}>
             <Printer className="size-4" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            title={focusMode ? "Exit focus view" : "Open focus view"}
+            aria-label={focusMode ? "Exit focus view" : "Open focus view"}
+            onClick={onToggleFocus}
+          >
+            {focusMode ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
           </Button>
         </div>
       </div>
@@ -516,9 +607,61 @@ export function TiptapEditor({
               className="sr-only"
             />
           </label>
-          <MenuButton onClick={() => editor.chain().focus().toggleHighlight().run()} isActive={editor.isActive("highlight")} disabled={isReadOnly} title="Highlight">
-            <Highlighter className="size-4" />
-          </MenuButton>
+          <div className="relative">
+            <Button
+              type="button"
+              variant={editor.isActive("highlight") || showHighlightPalette ? "secondary" : "ghost"}
+              size="icon-sm"
+              disabled={isReadOnly}
+              title="Highlight color"
+              aria-label="Choose highlight color"
+              aria-expanded={showHighlightPalette}
+              onClick={() => setShowHighlightPalette((visible) => !visible)}
+              className="h-8 w-8"
+            >
+              <Highlighter className="size-4" />
+            </Button>
+            {showHighlightPalette && (
+              <div className="absolute left-0 top-full z-30 mt-1 grid w-40 grid-cols-4 gap-1 rounded-lg border border-border bg-popover p-2 shadow-lg">
+                {highlightColors.map((color) => (
+                  <button
+                    key={color.name}
+                    type="button"
+                    aria-label={`${color.name} highlight`}
+                    title={`${color.name} highlight`}
+                    onClick={() => {
+                      editor.chain().focus().setHighlight({ color: color.value }).run()
+                      setShowHighlightPalette(false)
+                    }}
+                    className="size-7 rounded border border-border hover:ring-2 hover:ring-primary"
+                    style={{ backgroundColor: color.value }}
+                  />
+                ))}
+                <label className="col-span-4 mt-1 flex items-center justify-between rounded px-1 py-1 text-xs hover:bg-muted">
+                  Custom highlight color
+                  <input
+                    type="color"
+                    aria-label="Custom highlight color"
+                    onChange={(event) => {
+                      editor.chain().focus().setHighlight({ color: event.target.value }).run()
+                      setShowHighlightPalette(false)
+                    }}
+                    className="size-6 cursor-pointer border-0 bg-transparent p-0"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    editor.chain().focus().unsetHighlight().run()
+                    setShowHighlightPalette(false)
+                  }}
+                  className="col-span-4 mt-1 rounded px-2 py-1 text-left text-xs hover:bg-muted"
+                >
+                  Remove highlight
+                </button>
+              </div>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-0.5 border-l border-border pl-1">
           <MenuButton onClick={() => editor.chain().focus().toggleBulletList().run()} isActive={editor.isActive("bulletList")} disabled={isReadOnly} title="Bulleted list">
@@ -552,7 +695,7 @@ export function TiptapEditor({
           <MenuButton onClick={addImage} disabled={isReadOnly} title="Insert image from URL">
             <ImageIcon className="size-4" />
           </MenuButton>
-          <MenuButton onClick={addTable} disabled={isReadOnly} title="Insert table">
+          <MenuButton onClick={openTableDialog} disabled={isReadOnly} title="Insert table">
             <TableIcon className="size-4" />
           </MenuButton>
           <MenuButton onClick={() => editor.chain().focus().setBlockquote().run()} isActive={editor.isActive("blockquote")} disabled={isReadOnly} title="Block quote">
@@ -566,7 +709,7 @@ export function TiptapEditor({
           </MenuButton>
         </div>
         {editor.isActive("table") && (
-          <div className="flex items-center gap-0.5 border-l border-border pl-1">
+          <div className="relative flex items-center gap-0.5 border-l border-border pl-1">
             <MenuButton onClick={() => editor.chain().focus().addRowAfter().run()} title="Add table row">
               <Plus className="size-3.5" />
             </MenuButton>
@@ -579,6 +722,59 @@ export function TiptapEditor({
             <MenuButton onClick={() => editor.chain().focus().deleteColumn().run()} title="Delete table column">
               <X className="size-3.5" />
             </MenuButton>
+            <MenuButton
+              onClick={() => editor.chain().focus().toggleHeaderRow().run()}
+              title="Toggle header row"
+            >
+              <TableIcon className="size-3.5" />
+            </MenuButton>
+            <MenuButton onClick={() => editor.chain().focus().deleteTable().run()} title="Delete table">
+              <X className="size-3.5 text-destructive" />
+            </MenuButton>
+            <Button
+              type="button"
+              variant={showCellPalette ? "secondary" : "ghost"}
+              size="icon-sm"
+              title="Cell background color"
+              aria-label="Choose cell background color"
+              aria-expanded={showCellPalette}
+              onClick={() => setShowCellPalette((visible) => !visible)}
+              className="h-8 w-8"
+            >
+              <Paintbrush className="size-3.5" />
+            </Button>
+            {showCellPalette && (
+              <div className="absolute left-0 top-full z-30 mt-1 grid w-44 grid-cols-4 gap-1 rounded-lg border border-border bg-popover p-2 shadow-lg">
+                {cellColors.map((color) => (
+                  <button
+                    key={color.name}
+                    type="button"
+                    aria-label={`${color.name} cell fill`}
+                    title={`${color.name} cell fill`}
+                    onClick={() => {
+                      editor.chain().focus().setCellAttribute("backgroundColor", color.value || null).run()
+                      setShowCellPalette(false)
+                    }}
+                    className="size-7 rounded border border-border hover:ring-2 hover:ring-primary"
+                    style={{ backgroundColor: color.value || "transparent" }}
+                  >
+                    {color.value ? null : <X className="mx-auto size-4 text-muted-foreground" />}
+                  </button>
+                ))}
+                <label className="col-span-4 mt-1 flex items-center justify-between rounded px-1 py-1 text-xs hover:bg-muted">
+                  Custom cell color
+                  <input
+                    type="color"
+                    aria-label="Custom cell background color"
+                    onChange={(event) => {
+                      editor.chain().focus().setCellAttribute("backgroundColor", event.target.value).run()
+                      setShowCellPalette(false)
+                    }}
+                    className="size-6 cursor-pointer border-0 bg-transparent p-0"
+                  />
+                </label>
+              </div>
+            )}
           </div>
         )}
         <span className="ml-auto hidden items-center gap-2 pr-2 text-xs text-muted-foreground xl:flex">
@@ -667,6 +863,38 @@ export function TiptapEditor({
                 <p>Documents are stored locally in this browser.</p>
               </div>
             )}
+          </div>
+        </div>
+      )}
+      {showTableDialog && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onMouseDown={(event) => event.target === event.currentTarget && setShowTableDialog(false)}
+        >
+          <div role="dialog" aria-modal="true" aria-labelledby="table-dialog-title" className="w-full max-w-sm rounded-xl border border-border bg-card p-5 shadow-xl">
+            <h2 id="table-dialog-title" className="mb-1 text-lg font-semibold">Insert table</h2>
+            <p className="mb-4 text-sm text-muted-foreground">Choose any number of rows and columns. You can add or remove them later.</p>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="space-y-1.5 text-sm">
+                <span>Rows</span>
+                <Input type="number" min="1" max={MAX_TABLE_CELLS} step="1" value={tableRows} onChange={(event) => { setTableRows(event.target.value); setTableSizeError(null) }} />
+              </label>
+              <label className="space-y-1.5 text-sm">
+                <span>Columns</span>
+                <Input type="number" min="1" max={MAX_TABLE_CELLS} step="1" value={tableColumns} onChange={(event) => { setTableColumns(event.target.value); setTableSizeError(null) }} />
+              </label>
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">{tableRows || "0"} × {tableColumns || "0"} cells · Maximum {MAX_TABLE_CELLS.toLocaleString()}</p>
+            {tableSizeError && <p role="alert" className="mt-2 text-sm text-destructive">{tableSizeError}</p>}
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setShowTableDialog(false)}>Cancel</Button>
+              <Button
+                onClick={insertTable}
+                disabled={!Number.isSafeInteger(Number(tableRows)) || !Number.isSafeInteger(Number(tableColumns)) || Number(tableRows) < 1 || Number(tableColumns) < 1 || Number(tableRows) * Number(tableColumns) > MAX_TABLE_CELLS}
+              >
+                Insert table
+              </Button>
+            </div>
           </div>
         </div>
       )}

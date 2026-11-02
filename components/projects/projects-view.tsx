@@ -1,25 +1,28 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import {
   Plus,
   FolderKanban,
   Target,
   Calendar,
-  TrendingUp,
-  MoreHorizontal,
   Edit,
   Trash2,
-  ChevronDown,
-  Check,
-  Flag,
+  List,
+  Columns3,
+  LayoutGrid,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { ConfirmAction } from "@/components/ui/confirm-action"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
 import { cn } from "@/lib/utils"
-import { formatDueDate } from "@/lib/format"
+import { formatDueDate, isDateBeforeToday } from "@/lib/format"
+import { loadUserData, saveUserData } from "@/lib/user-data"
 import type { Project, Task } from "@/lib/types"
+
+const PROJECTS_STORAGE_KEY = "productivity-hub-projects-v1"
+const TASKS_STORAGE_KEY = "productivity-hub-tasks-v1"
 
 const statusConfig = {
   active: { label: "Active", color: "bg-green-500", bg: "bg-green-50 dark:bg-green-950/30", text: "text-green-700 dark:text-green-300" },
@@ -27,6 +30,52 @@ const statusConfig = {
 } as const
 
 type ProjectStatus = "active" | "paused"
+type ProjectViewMode = "grid" | "list" | "board"
+
+function localDateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`
+}
+
+function getDefaultDueDate(): string {
+  const date = new Date()
+  date.setDate(date.getDate() + 30)
+  return localDateKey(date)
+}
+
+function isProject(value: unknown): value is Project {
+  if (!value || typeof value !== "object") return false
+  const project = value as Record<string, unknown>
+  return typeof project.id === "string" &&
+    typeof project.name === "string" &&
+    (project.status === "active" || project.status === "paused") &&
+    typeof project.progress === "number" &&
+    typeof project.dueDate === "string"
+}
+
+function isTask(value: unknown): value is Task {
+  if (!value || typeof value !== "object") return false
+  const task = value as Record<string, unknown>
+  return typeof task.id === "string" &&
+    typeof task.title === "string" &&
+    (task.status === "todo" || task.status === "in-progress" || task.status === "done") &&
+    (task.project === undefined || typeof task.project === "string")
+}
+
+function ProjectViewToggle({ view, setView }: { view: ProjectViewMode; setView: (view: ProjectViewMode) => void }) {
+  return (
+    <div role="group" aria-label="Project view" className="flex items-center rounded-lg border border-border p-0.5">
+      {([
+        ["grid", LayoutGrid, "Grid"],
+        ["list", List, "List"],
+        ["board", Columns3, "Board"],
+      ] as const).map(([mode, Icon, label]) => (
+        <Button key={mode} type="button" size="icon-sm" variant={view === mode ? "secondary" : "ghost"} aria-label={`${label} view`} aria-pressed={view === mode} onClick={() => setView(mode)}>
+          <Icon className="size-4" />
+        </Button>
+      ))}
+    </div>
+  )
+}
 
 interface ProjectWithTasks extends Project {
   _tasks: Task[]
@@ -50,30 +99,101 @@ export function ProjectsView({
   onDeleteProject?: (id: string) => void
 }) {
   const [projects, setProjects] = useState<Project[]>(initialProjects)
+  const [projectTasks, setProjectTasks] = useState<Task[]>(tasks)
+  const [storageReady, setStorageReady] = useState(false)
+  const [storageLoadFailed, setStorageLoadFailed] = useState(false)
+  const [storageError, setStorageError] = useState<string | null>(null)
   const [view, setView] = useState<"grid" | "list" | "board">("grid")
   const [showAddModal, setShowAddModal] = useState(false)
   const [editingProject, setEditingProject] = useState<Project | null>(null)
   const [newProjectName, setNewProjectName] = useState("")
+  const [newProjectDueDate, setNewProjectDueDate] = useState(getDefaultDueDate)
 
   const projectsWithTasks = useMemo((): ProjectWithTasks[] => {
+    const tasksByProject = new Map<string, Task[]>()
+    for (const task of projectTasks) {
+      if (!task.project) continue
+      const projectTasks = tasksByProject.get(task.project) ?? []
+      projectTasks.push(task)
+      tasksByProject.set(task.project, projectTasks)
+    }
+
     return projects.map((project) => {
-      const projectTasks = tasks.filter((t) => t.project === project.name)
+      const projectTasks = tasksByProject.get(project.name) ?? []
       const completedTasks = projectTasks.filter((t) => t.status === "done").length
       const totalTasks = projectTasks.length
-      const calculatedProgress = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : project.progress
-      const isOverdue = new Date(project.dueDate) < new Date() && project.status === "active"
+      const calculatedProgress = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0
+      const isOverdue = isDateBeforeToday(project.dueDate) && project.status === "active"
       return { ...project, _tasks: projectTasks, _completedTasks: completedTasks, _totalTasks: totalTasks, _calculatedProgress: calculatedProgress, _isOverdue: isOverdue }
     })
-  }, [projects, tasks])
+  }, [projects, projectTasks])
+
+  useEffect(() => {
+    let active = true
+    void (async () => {
+      try {
+        const [savedProjects, savedTasks] = await Promise.all([
+          loadUserData<unknown>(PROJECTS_STORAGE_KEY),
+          loadUserData<unknown>(TASKS_STORAGE_KEY),
+        ])
+        if (savedProjects !== null && (!Array.isArray(savedProjects) || !savedProjects.every(isProject))) {
+          throw new Error("Saved project data is not a valid project list.")
+        }
+        if (savedTasks !== null && (!Array.isArray(savedTasks) || !savedTasks.every(isTask))) {
+          throw new Error("Saved task data is not a valid task list.")
+        }
+        if (active) {
+          if (savedProjects !== null) setProjects(savedProjects)
+          if (savedTasks !== null) setProjectTasks(savedTasks)
+        }
+      } catch (error) {
+        if (active) {
+          setStorageLoadFailed(true)
+          setStorageError(error instanceof Error ? error.message : "Could not load projects.")
+        }
+      } finally {
+        if (active) setStorageReady(true)
+      }
+    })()
+    return () => { active = false }
+  }, [])
+
+  useEffect(() => {
+    if (!storageReady || storageLoadFailed) return
+    const timer = window.setTimeout(() => {
+      void Promise.all([
+        saveUserData(PROJECTS_STORAGE_KEY, projects),
+        saveUserData(TASKS_STORAGE_KEY, projectTasks),
+      ]).then(() => setStorageError(null))
+        .catch((error: unknown) => setStorageError(error instanceof Error ? error.message : "Could not save project data."))
+    }, 100)
+    return () => window.clearTimeout(timer)
+  }, [projects, projectTasks, storageLoadFailed, storageReady])
+
+  const openNewProject = () => {
+    if (!storageReady || storageLoadFailed) return
+    setEditingProject(null)
+    setNewProjectName("")
+    setNewProjectDueDate(getDefaultDueDate())
+    setShowAddModal(true)
+  }
+
+  const openEditProject = (project: Project) => {
+    if (!storageReady || storageLoadFailed) return
+    setEditingProject(project)
+    setNewProjectName(project.name)
+    setNewProjectDueDate(project.dueDate)
+  }
 
   const handleAddProject = () => {
-    if (!newProjectName.trim()) return
+    const name = newProjectName.trim()
+    if (!storageReady || storageLoadFailed || !name || !newProjectDueDate || projects.some((project) => project.name.toLowerCase() === name.toLowerCase())) return
     const newProject: Project = {
-      id: `proj-${crypto.randomUUID()}`,
-      name: newProjectName.trim(),
+      id: `proj-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`,
+      name,
       status: "active",
       progress: 0,
-      dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+      dueDate: newProjectDueDate,
     }
     setProjects((current) => [newProject, ...current])
     onAddProject?.(newProject)
@@ -82,16 +202,22 @@ export function ProjectsView({
   }
 
   const handleUpdateProject = (id: string, updates: Partial<Project>) => {
+    if (!storageReady || storageLoadFailed) return
+    const existing = projects.find((project) => project.id === id)
     setProjects((current) => current.map((p) => (p.id === id ? { ...p, ...updates } : p)))
+    if (existing && updates.name && updates.name !== existing.name) {
+      setProjectTasks((current) => current.map((task) =>
+        task.project === existing.name ? { ...task, project: updates.name } : task
+      ))
+    }
     onUpdateProject?.(id, updates)
     setEditingProject(null)
   }
 
   const handleDeleteProject = (id: string) => {
-    if (confirm("Are you sure you want to delete this project?")) {
-      setProjects((current) => current.filter((p) => p.id !== id))
-      onDeleteProject?.(id)
-    }
+    if (!storageReady || storageLoadFailed) return
+    setProjects((current) => current.filter((p) => p.id !== id))
+    onDeleteProject?.(id)
   }
 
   const handleStatusChange = (project: ProjectWithTasks, newStatus: ProjectStatus) => {
@@ -99,11 +225,51 @@ export function ProjectsView({
     handleUpdateProject(project.id, updates)
   }
 
-  const handleProgressChange = (project: ProjectWithTasks, progress: number) => {
-    const clampedProgress = Math.min(100, Math.max(0, progress))
-    const updates: Partial<Project> = { progress: clampedProgress }
-    handleUpdateProject(project.id, updates)
+  const saveProject = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!storageReady || storageLoadFailed) return
+    const name = newProjectName.trim()
+    if (!name || !newProjectDueDate) return
+    const duplicate = projects.some((project) =>
+      project.id !== editingProject?.id && project.name.toLowerCase() === name.toLowerCase()
+    )
+    if (duplicate) return
+    if (editingProject) {
+      handleUpdateProject(editingProject.id, { name, dueDate: newProjectDueDate })
+    } else {
+      handleAddProject()
+      return
+    }
+    setShowAddModal(false)
   }
+
+  const projectEditor = (showAddModal || editingProject) ? (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <form onSubmit={saveProject} className="w-full max-w-md space-y-4 rounded-xl border border-border bg-card p-5 shadow-xl">
+        <div>
+          <h2 className="text-lg font-semibold">{editingProject ? "Edit project" : "New project"}</h2>
+          <p className="text-sm text-muted-foreground">Progress is calculated from completed tasks assigned to this project.</p>
+        </div>
+        <label className="block space-y-1.5 text-sm">
+          <span className="font-medium">Project name</span>
+          <Input required maxLength={80} value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} />
+        </label>
+        <label className="block space-y-1.5 text-sm">
+          <span className="font-medium">Due date</span>
+          <Input required type="date" value={newProjectDueDate} onChange={(event) => setNewProjectDueDate(event.target.value)} />
+        </label>
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" onClick={() => { setShowAddModal(false); setEditingProject(null) }}>Cancel</Button>
+          <Button type="submit">{editingProject ? "Save changes" : "Create project"}</Button>
+        </div>
+      </form>
+    </div>
+  ) : null
+  const storageStatus = storageError ? (
+    <p role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+      {storageError}
+    </p>
+  ) : null
 
   const activeProjects = projectsWithTasks.filter((p) => p.status === "active")
   const pausedProjects = projectsWithTasks.filter((p) => p.status === "paused")
@@ -111,12 +277,16 @@ export function ProjectsView({
   if (view === "board") {
     return (
       <div className="space-y-4">
+        {storageStatus}
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-semibold">Projects</h1>
-          <Button onClick={() => setShowAddModal(true)}>
+          <div className="flex items-center gap-2">
+            <ProjectViewToggle view={view} setView={setView} />
+            <Button onClick={openNewProject}>
             <Plus className="size-3.5 mr-1.5" />
             New Project
-          </Button>
+            </Button>
+          </div>
         </div>
 
         <div className="flex gap-4 overflow-x-auto pb-4">
@@ -146,7 +316,7 @@ export function ProjectsView({
                     key={project.id}
                     project={project}
                     onStatusChange={(status) => handleStatusChange(project, status)}
-                    onEdit={() => setEditingProject(project)}
+                    onEdit={() => openEditProject(project)}
                     onDelete={() => handleDeleteProject(project.id)}
                   />
                 ))}
@@ -156,6 +326,7 @@ export function ProjectsView({
                   </div>
                 )}
               </div>
+              {projectEditor}
             </div>
           ))}
         </div>
@@ -166,12 +337,16 @@ export function ProjectsView({
   if (view === "list") {
     return (
       <div className="space-y-4">
+        {storageStatus}
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-semibold">Projects</h1>
-          <Button onClick={() => setShowAddModal(true)}>
+          <div className="flex items-center gap-2">
+            <ProjectViewToggle view={view} setView={setView} />
+            <Button onClick={openNewProject}>
             <Plus className="size-3.5 mr-1.5" />
             New Project
-          </Button>
+            </Button>
+          </div>
         </div>
 
         <div className="rounded-xl border border-border bg-card overflow-hidden">
@@ -181,8 +356,7 @@ export function ProjectsView({
                 key={project.id}
                 project={project}
                 onStatusChange={(status) => handleStatusChange(project, status)}
-                onProgressChange={(progress) => handleProgressChange(project, progress)}
-                onEdit={() => setEditingProject(project)}
+                onEdit={() => openEditProject(project)}
                 onDelete={() => handleDeleteProject(project.id)}
               />
             ))}
@@ -197,18 +371,23 @@ export function ProjectsView({
             )}
           </ul>
         </div>
+        {projectEditor}
       </div>
     )
   }
 
   return (
     <div className="space-y-4">
+      {storageStatus}
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Projects</h1>
-        <Button onClick={() => setShowAddModal(true)}>
+        <div className="flex items-center gap-2">
+          <ProjectViewToggle view={view} setView={setView} />
+          <Button onClick={openNewProject}>
           <Plus className="size-3.5 mr-1.5" />
           New Project
-        </Button>
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -217,8 +396,7 @@ export function ProjectsView({
             key={project.id}
             project={project}
             onStatusChange={(status) => handleStatusChange(project, status)}
-            onProgressChange={(progress) => handleProgressChange(project, progress)}
-            onEdit={() => setEditingProject(project)}
+            onEdit={() => openEditProject(project)}
             onDelete={() => handleDeleteProject(project.id)}
           />
         ))}
@@ -234,6 +412,7 @@ export function ProjectsView({
           </div>
         )}
       </div>
+      {projectEditor}
     </div>
   )
 }
@@ -241,13 +420,11 @@ export function ProjectsView({
 function ProjectCard({
   project,
   onStatusChange,
-  onProgressChange,
   onEdit,
   onDelete,
 }: {
   project: ProjectWithTasks
   onStatusChange: (status: ProjectStatus) => void
-  onProgressChange: (progress: number) => void
   onEdit: () => void
   onDelete: () => void
 }) {
@@ -275,9 +452,17 @@ function ProjectCard({
           <Button variant="ghost" size="icon-xs" onClick={onEdit} aria-label="Edit project">
             <Edit className="size-3.5" />
           </Button>
-          <Button variant="ghost" size="icon-xs" onClick={onDelete} aria-label="Delete project">
-            <Trash2 className="size-3.5" />
-          </Button>
+          <ConfirmAction
+            title="Delete project?"
+            description={`Delete “${project.name}”? This cannot be undone.`}
+            onConfirm={onDelete}
+          >
+            {(openConfirmation) => (
+              <Button variant="ghost" size="icon-xs" onClick={openConfirmation} aria-label="Delete project">
+                <Trash2 className="size-3.5" />
+              </Button>
+            )}
+          </ConfirmAction>
         </div>
       </div>
 
@@ -325,13 +510,11 @@ function ProjectCard({
 function ProjectListItem({
   project,
   onStatusChange,
-  onProgressChange,
   onEdit,
   onDelete,
 }: {
   project: ProjectWithTasks
   onStatusChange: (status: ProjectStatus) => void
-  onProgressChange: (progress: number) => void
   onEdit: () => void
   onDelete: () => void
 }) {
@@ -378,9 +561,17 @@ function ProjectListItem({
           <Button variant="ghost" size="icon-sm" onClick={onEdit} aria-label="Edit project">
             <Edit className="size-4" />
           </Button>
-          <Button variant="ghost" size="icon-sm" onClick={onDelete} aria-label="Delete project">
-            <Trash2 className="size-4" />
-          </Button>
+          <ConfirmAction
+            title="Delete project?"
+            description={`Delete “${project.name}”? This cannot be undone.`}
+            onConfirm={onDelete}
+          >
+            {(openConfirmation) => (
+              <Button variant="ghost" size="icon-sm" onClick={openConfirmation} aria-label="Delete project">
+                <Trash2 className="size-4" />
+              </Button>
+            )}
+          </ConfirmAction>
         </div>
       </div>
     </li>
@@ -408,9 +599,17 @@ function ProjectBoardCard({
           <Button variant="ghost" size="icon-xs" onClick={onEdit} aria-label="Edit project">
             <Edit className="size-3.5" />
           </Button>
-          <Button variant="ghost" size="icon-xs" onClick={onDelete} aria-label="Delete project">
-            <Trash2 className="size-3.5" />
-          </Button>
+          <ConfirmAction
+            title="Delete project?"
+            description={`Delete “${project.name}”? This cannot be undone.`}
+            onConfirm={onDelete}
+          >
+            {(openConfirmation) => (
+              <Button variant="ghost" size="icon-xs" onClick={openConfirmation} aria-label="Delete project">
+                <Trash2 className="size-3.5" />
+              </Button>
+            )}
+          </ConfirmAction>
         </div>
       </div>
 

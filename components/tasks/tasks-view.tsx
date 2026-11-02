@@ -1,10 +1,7 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import {
-  Filter,
-  ChevronDown,
-  ChevronUp,
   Plus,
   CheckSquare,
   Flag,
@@ -12,11 +9,13 @@ import {
   FolderKanban,
   Search,
   X,
+  Pencil,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { loadUserData, removeUserData, saveUserData } from "@/lib/user-data"
 import { cn } from "@/lib/utils"
-import { formatDueDate } from "@/lib/format"
+import { formatDueDate, isDateBeforeToday } from "@/lib/format"
 import type { Task, Priority, TaskStatus, Project } from "@/lib/types"
 
 const statusLabels: Record<TaskStatus, string> = {
@@ -55,6 +54,57 @@ const statusColors: Record<TaskStatus, string> = {
   done: "bg-green-500",
 }
 
+const TASKS_STORAGE_KEY = "productivity-hub-tasks-v1"
+const PROJECTS_STORAGE_KEY = "productivity-hub-projects-v1"
+const CUSTOM_AREA_VALUE = "__custom_area__"
+const DEFAULT_AREAS = ["School", "Life", "Work"]
+type TaskDraft = Omit<Task, "id">
+
+function localDateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`
+}
+
+function getDefaultDueDate(): string {
+  const tomorrow = new Date()
+  tomorrow.setDate(tomorrow.getDate() + 1)
+  return localDateKey(tomorrow)
+}
+
+function isTask(value: unknown): value is Task {
+  if (!value || typeof value !== "object") return false
+  const task = value as Record<string, unknown>
+  return (
+    typeof task.id === "string" &&
+    typeof task.title === "string" &&
+    isValidDateKey(task.dueDate) &&
+    (task.priority === "high" || task.priority === "medium" || task.priority === "low") &&
+    (task.status === "todo" || task.status === "in-progress" || task.status === "done") &&
+    (task.project === undefined || typeof task.project === "string") &&
+    (task.area === undefined || typeof task.area === "string") &&
+    (task.completedAt === undefined || (typeof task.completedAt === "string" && !Number.isNaN(Date.parse(task.completedAt))))
+  )
+}
+
+function isValidDateKey(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const date = new Date(`${value}T00:00:00`)
+  return !Number.isNaN(date.getTime()) && localDateKey(date) === value
+}
+
+function isProject(value: unknown): value is Project {
+  if (!value || typeof value !== "object") return false
+  const project = value as Record<string, unknown>
+  return typeof project.id === "string" &&
+    typeof project.name === "string" &&
+    (project.status === "active" || project.status === "paused") &&
+    typeof project.progress === "number" &&
+    typeof project.dueDate === "string"
+}
+
+function isOverdue(task: Task): boolean {
+  return task.status !== "done" && isDateBeforeToday(task.dueDate)
+}
+
 export function TasksView({
   tasks: initialTasks,
   projects,
@@ -69,6 +119,14 @@ export function TasksView({
   onDeleteTask?: (id: string) => void
 }) {
   const [tasks, setTasks] = useState(initialTasks)
+  const [projectOptions, setProjectOptions] = useState(projects)
+  const [storageReady, setStorageReady] = useState(false)
+  const [storageLoadFailed, setStorageLoadFailed] = useState(false)
+  const [storageError, setStorageError] = useState<string | null>(null)
+  const [taskDraft, setTaskDraft] = useState<TaskDraft | null>(null)
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null)
+  const [customArea, setCustomArea] = useState("")
+  const [isCustomArea, setIsCustomArea] = useState(false)
   const [filter, setFilter] = useState<{
     status: TaskStatus | "all"
     priority: Priority | "all"
@@ -85,7 +143,62 @@ export function TasksView({
     direction: "asc" | "desc"
   }>({ key: "dueDate", direction: "asc" })
   const [view, setView] = useState<"list" | "board">("list")
-  const [groupBy, setGroupBy] = useState<"none" | "project" | "status" | "priority">("none")
+  const [groupBy, setGroupBy] = useState<"none" | "area" | "project" | "status" | "priority">("area")
+  const areaOptions = useMemo(
+    () => Array.from(new Set([...DEFAULT_AREAS, ...tasks.map((task) => task.area?.trim() || "Life")])),
+    [tasks]
+  )
+
+  useEffect(() => {
+    let active = true
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const [parsed, savedProjects] = await Promise.all([
+            loadUserData<unknown>(TASKS_STORAGE_KEY),
+            loadUserData<unknown>(PROJECTS_STORAGE_KEY),
+          ])
+          if (parsed !== null) {
+            if (!Array.isArray(parsed) || !parsed.every(isTask)) {
+              throw new Error("Saved task data is not a valid task list.")
+            }
+            if (active) setTasks(parsed.map((task) => ({ ...task, area: task.area?.trim() || "Life" })))
+          } else if (active) {
+            setTasks(initialTasks.map((task) => ({ ...task, area: task.area?.trim() || "Life" })))
+          }
+          if (savedProjects !== null) {
+            if (!Array.isArray(savedProjects) || !savedProjects.every(isProject)) {
+              throw new Error("Saved project data is not a valid project list.")
+            }
+            if (active) setProjectOptions(savedProjects)
+          } else if (active) {
+            setProjectOptions(projects)
+          }
+        } catch (error) {
+          if (active) {
+            setStorageLoadFailed(true)
+            setStorageError(error instanceof Error ? error.message : "Could not load saved tasks.")
+          }
+        } finally {
+          if (active) setStorageReady(true)
+        }
+      })()
+    }, 0)
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [initialTasks, projects])
+
+  useEffect(() => {
+    if (!storageReady || storageLoadFailed) return
+    const timer = window.setTimeout(() => {
+      void saveUserData(TASKS_STORAGE_KEY, tasks)
+        .then(() => setStorageError(null))
+        .catch((error: unknown) => setStorageError(error instanceof Error ? error.message : "Could not save tasks."))
+    }, 100)
+    return () => window.clearTimeout(timer)
+  }, [tasks, storageLoadFailed, storageReady])
 
   const filteredTasks = useMemo(() => {
     return tasks
@@ -95,7 +208,8 @@ export function TasksView({
         if (filter.project !== "all" && task.project !== filter.project) return false
         if (filter.search) {
           const search = filter.search.toLowerCase()
-          if (!task.title.toLowerCase().includes(search)) return false
+          const searchable = `${task.title} ${task.area ?? ""} ${task.project ?? ""}`.toLowerCase()
+          if (!searchable.includes(search)) return false
         }
         return true
       })
@@ -136,6 +250,9 @@ export function TasksView({
         case "project":
           key = task.project || "No Project"
           break
+        case "area":
+          key = task.area?.trim() || "Life"
+          break
         case "status":
           key = statusLabels[task.status]
           break
@@ -149,28 +266,71 @@ export function TasksView({
     return Object.fromEntries(groups)
   }, [filteredTasks, groupBy])
 
-  const handleAddTask = (title: string) => {
-    if (!title.trim()) return
-    const tomorrow = new Date()
-    tomorrow.setDate(tomorrow.getDate() + 1)
-    const dueDate = tomorrow.toISOString().split("T")[0]
-
-    const newTask: Task = {
-      id: `task-${crypto.randomUUID()}`,
-      title: title.trim(),
-      dueDate,
+  const openNewTask = () => {
+    setEditingTaskId(null)
+    setIsCustomArea(false)
+    setCustomArea("")
+    setTaskDraft({
+      title: "",
+      dueDate: getDefaultDueDate(),
       priority: "medium",
       status: "todo",
-    }
+      area: "Life",
+    })
+  }
 
-    setTasks((current) => [newTask, ...current])
-    onAddTask?.(newTask)
+  const openEditTask = (task: Task) => {
+    setEditingTaskId(task.id)
+    setIsCustomArea(false)
+    setCustomArea("")
+    setTaskDraft({
+      title: task.title,
+      dueDate: task.dueDate,
+      priority: task.priority,
+      status: task.status,
+      area: task.area || "Life",
+      project: task.project,
+    })
+  }
+
+  const handleSaveTask = () => {
+    const area = isCustomArea ? customArea.trim() : taskDraft?.area?.trim()
+    if (!taskDraft || !taskDraft.title.trim() || !taskDraft.dueDate || !area) return
+    const normalizedTask = {
+      ...taskDraft,
+      title: taskDraft.title.trim(),
+      area,
+      project: taskDraft.project?.trim() || undefined,
+    }
+    if (editingTaskId) {
+      const existing = tasks.find((task) => task.id === editingTaskId)
+      const completedAt = normalizedTask.status !== "done"
+        ? undefined
+        : existing?.status === "done"
+          ? existing.completedAt
+          : new Date().toISOString()
+      setTasks((current) => current.map((task) => task.id === editingTaskId
+        ? { ...normalizedTask, id: editingTaskId, completedAt }
+        : task
+      ))
+    } else {
+      const id = `task-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`
+      const newTask: Task = { ...normalizedTask, id }
+      setTasks((current) => [newTask, ...current])
+      onAddTask?.(newTask)
+    }
+    setTaskDraft(null)
+    setEditingTaskId(null)
+    setCustomArea("")
+    setIsCustomArea(false)
   }
 
   const handleToggleTask = (task: Task) => {
     const newStatus: TaskStatus = task.status === "done" ? "todo" : "done"
     setTasks((current) =>
-      current.map((t) => (t.id === task.id ? { ...t, status: newStatus } : t))
+      current.map((t) => (t.id === task.id
+        ? { ...t, status: newStatus, completedAt: newStatus === "done" ? new Date().toISOString() : undefined }
+        : t))
     )
     onToggleTask?.(task.id, newStatus)
   }
@@ -178,6 +338,14 @@ export function TasksView({
   const handleDeleteTask = (id: string) => {
     setTasks((current) => current.filter((t) => t.id !== id))
     onDeleteTask?.(id)
+  }
+
+  const resetSavedTasks = () => {
+    void removeUserData(TASKS_STORAGE_KEY).then(() => {
+      setTasks(initialTasks.map((task) => ({ ...task, area: task.area?.trim() || "Life" })))
+      setStorageLoadFailed(false)
+      setStorageError(null)
+    }).catch((error: unknown) => setStorageError(error instanceof Error ? error.message : "Could not reset saved tasks."))
   }
 
   const clearFilters = () => {
@@ -199,6 +367,16 @@ export function TasksView({
             {filteredTasks.length} task{filteredTasks.length !== 1 ? "s" : ""}
           </span>
         </div>
+        {storageError && (
+          <div role="status" className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+            <span>{storageError}</span>
+            {storageLoadFailed && (
+              <Button type="button" variant="outline" size="sm" onClick={resetSavedTasks}>
+                Restore starter tasks
+              </Button>
+            )}
+          </div>
+        )}
 
         <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
           <div className="relative flex-1 max-w-sm">
@@ -266,7 +444,7 @@ export function TasksView({
           className="flex items-center gap-1 border border-border rounded-lg bg-background px-2.5 py-1 text-xs font-medium text-muted-foreground"
         >
           <option value="all">All Projects</option>
-          {projects.map((p) => (
+          {projectOptions.map((p) => (
             <option key={p.id} value={p.name}>
               {p.name}
             </option>
@@ -319,7 +497,9 @@ export function TasksView({
           value={groupBy}
           onChange={(e) => setGroupBy(e.target.value as typeof groupBy)}
           className="border border-border rounded-lg bg-background px-2.5 py-1 text-xs font-medium text-muted-foreground"
+          aria-label="Group tasks by"
         >
+          <option value="area">Group by Area / Subject</option>
           <option value="none">No Grouping</option>
           <option value="project">Group by Project</option>
           <option value="status">Group by Status</option>
@@ -344,6 +524,7 @@ export function TasksView({
                     key={task.id}
                     task={task}
                     onToggle={() => handleToggleTask(task)}
+                    onEdit={() => openEditTask(task)}
                     onDelete={() => handleDeleteTask(task.id)}
                   />
                 ))}
@@ -389,6 +570,7 @@ export function TasksView({
                       key={task.id}
                       task={task}
                       onToggle={() => handleToggleTask(task)}
+                      onEdit={() => openEditTask(task)}
                       onDelete={() => handleDeleteTask(task.id)}
                     />
                   ))}
@@ -406,18 +588,137 @@ export function TasksView({
 
       <div className="border-t border-border pt-4">
         <Button
-          variant="outline"
+          variant="default"
           size="sm"
-          onClick={() => {
-            const title = prompt("Enter task title:")
-            if (title) handleAddTask(title)
-          }}
+          onClick={openNewTask}
           className="w-full sm:w-auto"
         >
           <Plus className="size-3.5 mr-1.5" />
           Add Task
         </Button>
       </div>
+
+      {taskDraft && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onMouseDown={(event) => event.target === event.currentTarget && setTaskDraft(null)}
+        >
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="task-dialog-title"
+            className="w-full max-w-lg space-y-4 rounded-2xl border border-border bg-card p-5 shadow-xl"
+            onSubmit={(event) => {
+              event.preventDefault()
+              handleSaveTask()
+            }}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 id="task-dialog-title" className="text-lg font-semibold">
+                  {editingTaskId ? "Edit task" : "Create task"}
+                </h2>
+                <p className="text-sm text-muted-foreground">Set its priority, due date, and area.</p>
+              </div>
+              <Button type="button" variant="ghost" size="icon-sm" aria-label="Close task form" onClick={() => setTaskDraft(null)}>
+                <X className="size-4" />
+              </Button>
+            </div>
+            <label className="block space-y-1.5 text-sm">
+              <span className="font-medium">Task name</span>
+              <Input
+                autoFocus
+                required
+                maxLength={160}
+                value={taskDraft.title}
+                onChange={(event) => setTaskDraft({ ...taskDraft, title: event.target.value })}
+                placeholder="e.g. Prepare biology revision notes"
+              />
+            </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="space-y-1.5 text-sm">
+                <span className="font-medium">Area / subject</span>
+                <select
+                  value={isCustomArea ? CUSTOM_AREA_VALUE : taskDraft.area ?? "Life"}
+                  onChange={(event) => {
+                    if (event.target.value === CUSTOM_AREA_VALUE) {
+                      setIsCustomArea(true)
+                      setCustomArea("")
+                      setTaskDraft({ ...taskDraft, area: "" })
+                    } else {
+                      setIsCustomArea(false)
+                      setTaskDraft({ ...taskDraft, area: event.target.value })
+                    }
+                  }}
+                  className="h-9 w-full rounded-lg border border-input bg-background px-2.5 text-sm"
+                >
+                  {areaOptions.map((area) => <option key={area} value={area}>{area}</option>)}
+                  <option value={CUSTOM_AREA_VALUE}>Add a custom area…</option>
+                </select>
+                {isCustomArea && (
+                  <Input
+                    required
+                    maxLength={48}
+                    value={customArea}
+                    onChange={(event) => setCustomArea(event.target.value)}
+                    placeholder="Enter an area or subject"
+                  />
+                )}
+              </label>
+              <label className="space-y-1.5 text-sm">
+                <span className="font-medium">Project</span>
+                <select
+                  value={taskDraft.project ?? ""}
+                  onChange={(event) => setTaskDraft({ ...taskDraft, project: event.target.value || undefined })}
+                  className="h-9 w-full rounded-lg border border-input bg-background px-2.5 text-sm"
+                >
+                  <option value="">No project</option>
+                  {projectOptions.map((project) => <option key={project.id} value={project.name}>{project.name}</option>)}
+                </select>
+              </label>
+              <label className="space-y-1.5 text-sm">
+                <span className="font-medium">Priority</span>
+                <select
+                  value={taskDraft.priority}
+                  onChange={(event) => setTaskDraft({ ...taskDraft, priority: event.target.value as Priority })}
+                  className="h-9 w-full rounded-lg border border-input bg-background px-2.5 text-sm"
+                >
+                  <option value="high">High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                </select>
+              </label>
+              <label className="space-y-1.5 text-sm">
+                <span className="font-medium">Due date</span>
+                <Input
+                  required
+                  type="date"
+                  value={taskDraft.dueDate}
+                  onChange={(event) => setTaskDraft({ ...taskDraft, dueDate: event.target.value })}
+                />
+              </label>
+              {editingTaskId && (
+                <label className="space-y-1.5 text-sm sm:col-span-2">
+                  <span className="font-medium">Status</span>
+                  <select
+                    value={taskDraft.status}
+                    onChange={(event) => setTaskDraft({ ...taskDraft, status: event.target.value as TaskStatus })}
+                    className="h-9 w-full rounded-lg border border-input bg-background px-2.5 text-sm"
+                  >
+                    <option value="todo">To Do</option>
+                    <option value="in-progress">In Progress</option>
+                    <option value="done">Done</option>
+                  </select>
+                </label>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 pt-1">
+              <Button type="button" variant="outline" onClick={() => setTaskDraft(null)}>Cancel</Button>
+              <Button type="submit">{editingTaskId ? "Save changes" : "Add task"}</Button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   )
 }
@@ -425,14 +726,15 @@ export function TasksView({
 function TaskRow({
   task,
   onToggle,
+  onEdit,
   onDelete,
 }: {
   task: Task
   onToggle: () => void
+  onEdit: () => void
   onDelete: () => void
 }) {
-  const isOverdue =
-    new Date(task.dueDate) < new Date() && task.status !== "done"
+  const overdue = isOverdue(task)
 
   return (
     <li className="flex items-center gap-3 px-4 py-3 hover:bg-muted/50 transition-colors">
@@ -466,6 +768,9 @@ function TaskRow({
               {task.project}
             </span>
           )}
+          {task.area && (
+            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-primary">{task.area}</span>
+          )}
           <span className={cn(
             "flex items-center gap-1 px-2 py-0.5 rounded-full",
             priorityBgColors[task.priority],
@@ -476,15 +781,23 @@ function TaskRow({
           </span>
           <span className={cn(
             "flex items-center gap-1",
-            isOverdue && task.status !== "done" && "text-red-500"
+            overdue && "text-red-500"
           )}>
             <Calendar className="size-3" />
             {formatDueDate(task.dueDate)}
-            {isOverdue && task.status !== "done" && " (Overdue)"}
+            {overdue && " (Overdue)"}
           </span>
         </div>
       </div>
 
+      <button
+        type="button"
+        onClick={onEdit}
+        className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        aria-label={`Edit ${task.title}`}
+      >
+        <Pencil className="size-4" />
+      </button>
       <button
         type="button"
         onClick={onDelete}
@@ -500,14 +813,15 @@ function TaskRow({
 function TaskCard({
   task,
   onToggle,
+  onEdit,
   onDelete,
 }: {
   task: Task
   onToggle: () => void
+  onEdit: () => void
   onDelete: () => void
 }) {
-  const isOverdue =
-    new Date(task.dueDate) < new Date() && task.status !== "done"
+  const overdue = isOverdue(task)
 
   return (
     <div
@@ -525,16 +839,27 @@ function TaskCard({
         >
           {task.title}
         </p>
-        <button
-          type="button"
-          onClick={onDelete}
-          className="text-muted-foreground hover:text-destructive transition-colors p-0.5"
-          aria-label="Delete task"
-        >
-          <X className="size-3.5" />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={onEdit}
+            className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-label={`Edit ${task.title}`}
+          >
+            <Pencil className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={onDelete}
+            className="text-muted-foreground hover:text-destructive transition-colors p-0.5"
+            aria-label="Delete task"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
       </div>
 
+      {task.area && <p className="mt-1 text-xs text-primary">{task.area}</p>}
       {task.project && (
         <p className="mt-1.5 text-xs text-muted-foreground flex items-center gap-1">
           <FolderKanban className="size-3" />
@@ -553,7 +878,7 @@ function TaskCard({
         </span>
         <span className={cn(
           "flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium text-muted-foreground bg-muted",
-          isOverdue && task.status !== "done" && "text-red-500 bg-red-50 dark:bg-red-950/30"
+          overdue && "text-red-500 bg-red-50 dark:bg-red-950/30"
         )}>
           <Calendar className="size-2.5" />
           {formatDueDate(task.dueDate)}

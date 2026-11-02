@@ -10,9 +10,12 @@ import {
   ChevronLeft,
   ChevronRight,
   Save,
+  Maximize2,
+  Minimize2,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { loadUserData, saveUserData } from "@/lib/user-data"
 import { cn } from "@/lib/utils"
 import { FileTree } from "./file-tree"
 import { TiptapEditor } from "./tiptap-editor"
@@ -133,6 +136,15 @@ function collectNodeIds(node: FileNode): string[] {
   return [node.id, ...(node.children?.flatMap(collectNodeIds) ?? [])]
 }
 
+function findFirstDocument(nodes: FileNode[]): FileNode | null {
+  for (const node of nodes) {
+    if (node.type === "document") return node
+    const childDocument = node.children ? findFirstDocument(node.children) : null
+    if (childDocument) return childDocument
+  }
+  return null
+}
+
 function isFileNode(value: unknown): value is FileNode {
   if (!value || typeof value !== "object") return false
   const node = value as Record<string, unknown>
@@ -169,6 +181,7 @@ export function NotesView({
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [openDocumentIds, setOpenDocumentIds] = useState<string[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [focusMode, setFocusMode] = useState(false)
   const [showNewFileDialog, setShowNewFileDialog] = useState(false)
   const [newFileName, setNewFileName] = useState("")
   const [newFileType, setNewFileType] = useState<"folder" | "document">("document")
@@ -178,44 +191,70 @@ export function NotesView({
   const [storageLoadFailed, setStorageLoadFailed] = useState(false)
   const [storageError, setStorageError] = useState<string | null>(null)
 
+  useEffect(() => {
+    const query = window.matchMedia("(min-width: 1280px)")
+    const updateSidebar = () => setSidebarOpen(query.matches)
+    updateSidebar()
+    query.addEventListener("change", updateSidebar)
+    return () => query.removeEventListener("change", updateSidebar)
+  }, [])
+
   const selectedFile = useMemo(() => findNode(files, selectedFileId || ""), [files, selectedFileId])
   const visibleFiles = useMemo(() => filterFileTree(files, searchValue.trim()), [files, searchValue])
 
   useEffect(() => {
+    let active = true
     const timer = window.setTimeout(() => {
-      try {
-        const saved = window.localStorage.getItem(NOTES_STORAGE_KEY)
-        if (saved !== null) {
-          const parsed: unknown = JSON.parse(saved)
+      void (async () => {
+        try {
+          const parsed = await loadUserData<unknown>(NOTES_STORAGE_KEY)
+          let loadedFiles = initialData.files || []
+          if (parsed !== null) {
           if (!Array.isArray(parsed) || !parsed.every(isFileNode)) {
             throw new Error("Saved notes data is not a valid file list.")
           }
-          setFiles(parsed)
+            loadedFiles = parsed
+          }
+          if (active) {
+            setFiles(loadedFiles)
+            const firstDocument = findFirstDocument(loadedFiles)
+            if (firstDocument) {
+              setSelectedFileId(firstDocument.id)
+              setOpenDocumentIds([firstDocument.id])
+            }
+          }
+        } catch (error) {
+          if (active) {
+            setStorageLoadFailed(true)
+            setStorageError(error instanceof Error ? error.message : "Could not load saved notes.")
+          }
+        } finally {
+          if (active) setStorageReady(true)
         }
-      } catch (error) {
-        setStorageLoadFailed(true)
-        setStorageError(
-          error instanceof Error ? error.message : "Could not load saved notes."
-        )
-      } finally {
-        setStorageReady(true)
-      }
+      })()
     }, 0)
-    return () => window.clearTimeout(timer)
-  }, [])
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [initialData.files])
+
+  useEffect(() => {
+    if (!focusMode) return
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFocusMode(false)
+    }
+    window.addEventListener("keydown", handleEscape)
+    return () => window.removeEventListener("keydown", handleEscape)
+  }, [focusMode])
 
   useEffect(() => {
     if (!storageReady || storageLoadFailed) return
     const timer = window.setTimeout(() => {
-      try {
-        window.localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(files))
-        onUpdateDashboard?.({ files })
-        setStorageError(null)
-      } catch (error) {
-        setStorageError(
-          error instanceof Error ? error.message : "Could not save notes."
-        )
-      }
+      onUpdateDashboard?.({ files })
+      void saveUserData(NOTES_STORAGE_KEY, files)
+        .then(() => setStorageError(null))
+        .catch((error: unknown) => setStorageError(error instanceof Error ? error.message : "Could not save notes."))
     }, 150)
     return () => window.clearTimeout(timer)
   }, [files, onUpdateDashboard, storageLoadFailed, storageReady])
@@ -263,7 +302,6 @@ export function NotesView({
   }, [])
 
   const handleDeleteFile = useCallback((file: FileNode) => {
-    if (!confirm(`Delete "${file.name}"?`)) return
     const removedIds = collectNodeIds(file)
     setFiles((current) => removeNode(current, file.id))
     setOpenDocumentIds((current) => current.filter((id) => !removedIds.includes(id)))
@@ -289,7 +327,10 @@ export function NotesView({
   }, [])
 
   return (
-    <div className="flex h-[calc(100dvh-180px)] min-h-[480px] flex-col overflow-hidden rounded-xl border border-border bg-background">
+    <div className={cn(
+      "flex h-[calc(100dvh-180px)] min-h-[480px] flex-col overflow-hidden rounded-xl border border-border bg-background",
+      focusMode && "fixed inset-0 z-[60] h-dvh w-screen max-w-none rounded-none border-0"
+    )}>
       {/* Top Bar */}
       <div className="flex items-center justify-between border-b border-border px-4 py-3 bg-card">
         <div className="flex items-center gap-3">
@@ -297,11 +338,12 @@ export function NotesView({
             variant="ghost"
             size="icon-sm"
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="md:hidden"
+            aria-label={sidebarOpen ? "Hide file browser" : "Show file browser"}
+            title={sidebarOpen ? "Hide file browser" : "Show file browser"}
           >
             {sidebarOpen ? <ChevronLeft className="size-4" /> : <ChevronRight className="size-4" />}
           </Button>
-          <h1 className="text-xl font-semibold">Notes</h1>
+          <h1 className="text-xl font-semibold">{focusMode ? selectedFile?.name ?? "Notes" : "Notes"}</h1>
         </div>
 
         <div className="flex items-center gap-2">
@@ -319,6 +361,15 @@ export function NotesView({
             <Plus className="size-3.5 mr-1.5" />
             New Document
           </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label={focusMode ? "Exit focus view" : "Focus view"}
+            title={focusMode ? "Exit focus view" : "Open centered focus view"}
+            onClick={() => setFocusMode((active) => !active)}
+          >
+            {focusMode ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
+          </Button>
           <div className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex">
             <Save className="size-3.5" />
             {storageError ? "Save failed" : storageReady ? "Saved on this device" : "Loading notes"}
@@ -332,12 +383,12 @@ export function NotesView({
       )}
 
       {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex min-w-0 flex-1 overflow-hidden">
         {/* Sidebar - File Tree */}
         <aside
           className={cn(
             "w-72 flex-shrink-0 border-r border-border bg-card flex flex-col transition-all duration-200",
-            !sidebarOpen && "w-0 overflow-hidden border-0"
+            (!sidebarOpen || focusMode) && "w-0 overflow-hidden border-0"
           )}
         >
           <FileTree
@@ -409,7 +460,7 @@ export function NotesView({
               </div>
 
               {/* Editor */}
-              <div className="flex-1 flex overflow-hidden">
+              <div className="flex min-w-0 flex-1 overflow-hidden">
                 <TiptapEditor
                   key={selectedFile.id}
                   content={selectedFile.content || ""}
@@ -417,6 +468,8 @@ export function NotesView({
                   placeholder="Start writing your document..."
                   onNewDocument={() => handleCreateFile(null)}
                   title={selectedFile.name}
+                  focusMode={focusMode}
+                  onToggleFocus={() => setFocusMode((active) => !active)}
                 />
               </div>
             </>
