@@ -236,7 +236,6 @@ revoke all on function public.create_profile_for_new_user() from public;
 revoke all on function public.admin_set_user_role(uuid, text) from public;
 revoke all on function public.admin_set_user_active(uuid, boolean) from public;
 revoke all on function public.restore_user_data(jsonb) from public;
-revoke all on function public.set_user_data_updated_at() from public;
 
 grant execute on function public.is_active_user() to authenticated;
 grant execute on function public.is_admin() to authenticated;
@@ -256,6 +255,8 @@ begin
   return new;
 end;
 $$;
+
+revoke all on function public.set_user_data_updated_at() from public;
 
 drop trigger if exists user_data_updated_at on public.user_data;
 create trigger user_data_updated_at

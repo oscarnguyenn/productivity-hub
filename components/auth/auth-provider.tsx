@@ -58,14 +58,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!client) return
     setLoading(true)
     try {
-      const { data, error: userError } = await client.auth.getUser()
-      if (userError) throw userError
-      if (!data.user) {
+      const { data, error: sessionError } = await client.auth.getSession()
+      if (sessionError) throw sessionError
+      if (!data.session) {
         setUser(null)
         setProfile(null)
         setError(null)
       } else {
-        await fetchProfile(client, data.user)
+        await fetchProfile(client, data.session.user)
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not load your account.")
@@ -80,11 +80,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let active = true
     const loadCurrentUser = async () => {
       try {
-        const { data, error: userError } = await client.auth.getUser()
-        if (userError) throw userError
-        if (data.user) {
-          setUser(data.user)
-          await fetchProfile(client, data.user)
+        const { data, error: sessionError } = await client.auth.getSession()
+        if (sessionError) throw sessionError
+        if (data.session) {
+          setUser(data.session.user)
+          await fetchProfile(client, data.session.user)
         }
         else {
           setUser(null)
