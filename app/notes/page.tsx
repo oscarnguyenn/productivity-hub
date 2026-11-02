@@ -1,6 +1,5 @@
-import { SectionPlaceholder } from "@/components/layout/section-placeholder"
-import { moduleCopy } from "@/lib/navigation"
+import { NotesView } from "@/components/notes/notes-view"
 
 export default function NotesPage() {
-  return <SectionPlaceholder {...moduleCopy["/notes"]} />
+  return <NotesView />
 }

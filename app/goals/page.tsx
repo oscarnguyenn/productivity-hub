@@ -1,6 +1,6 @@
-import { SectionPlaceholder } from "@/components/layout/section-placeholder"
-import { moduleCopy } from "@/lib/navigation"
+import { GoalsView } from "@/components/goals/goals-view"
+import { sampleDashboard } from "@/lib/data/sample"
 
 export default function GoalsPage() {
-  return <SectionPlaceholder {...moduleCopy["/goals"]} />
+  return <GoalsView goals={sampleDashboard.goals} />
 }

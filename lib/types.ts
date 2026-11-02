@@ -29,8 +29,9 @@ export interface UserProfile {
 export interface CalendarEvent {
   id: string
   title: string
-  start: string
-  end: string
+  date: string // ISO date string (e.g., "2026-11-02")
+  start: string // Time string (e.g., "09:00")
+  end: string   // Time string (e.g., "10:20")
   type: EventType
   location?: string
 }
@@ -69,6 +70,21 @@ export interface Habit {
   week: boolean[]
 }
 
+// File system types for Google Drive-like notes
+export type FileNodeType = "folder" | "document"
+
+export interface FileNode {
+  id: string
+  name: string
+  type: FileNodeType
+  parentId: string | null
+  children?: FileNode[] // Only for folders
+  content?: string // Only for documents (JSON string from TipTap)
+  createdAt: string
+  updatedAt: string
+  isExpanded?: boolean // UI state for folders
+}
+
 export interface DashboardData {
   user: UserProfile
   layout: WidgetLayoutItem[]
@@ -77,4 +93,5 @@ export interface DashboardData {
   projects: Project[]
   goals: Goal[]
   habits: Habit[]
+  files: FileNode[] // Root level files/folders
 }

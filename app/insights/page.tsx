@@ -1,6 +1,6 @@
-import { SectionPlaceholder } from "@/components/layout/section-placeholder"
-import { moduleCopy } from "@/lib/navigation"
+import { InsightsView } from "@/components/insights/insights-view"
+import { sampleDashboard } from "@/lib/data/sample"
 
 export default function InsightsPage() {
-  return <SectionPlaceholder {...moduleCopy["/insights"]} />
+  return <InsightsView data={sampleDashboard} />
 }

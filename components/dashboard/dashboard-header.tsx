@@ -1,17 +1,13 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { formatLongDate, greetingForHour } from "@/lib/format"
 
 export function DashboardHeader({ name }: { name: string }) {
-  const [now, setNow] = useState<Date | null>(null)
+  const [now] = useState<Date>(() => new Date())
 
-  useEffect(() => {
-    setNow(new Date())
-  }, [])
-
-  const greeting = now ? greetingForHour(now.getHours()) : "Hello"
-  const dateLabel = now ? formatLongDate(now) : "Today"
+  const greeting = greetingForHour(now.getHours())
+  const dateLabel = formatLongDate(now)
 
   return (
     <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">

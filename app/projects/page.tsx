@@ -1,6 +1,11 @@
-import { SectionPlaceholder } from "@/components/layout/section-placeholder"
-import { moduleCopy } from "@/lib/navigation"
+import { ProjectsView } from "@/components/projects/projects-view"
+import { sampleDashboard } from "@/lib/data/sample"
 
 export default function ProjectsPage() {
-  return <SectionPlaceholder {...moduleCopy["/projects"]} />
+  return (
+    <ProjectsView
+      projects={sampleDashboard.projects}
+      tasks={sampleDashboard.tasks}
+    />
+  )
 }

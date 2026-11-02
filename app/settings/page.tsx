@@ -1,6 +1,12 @@
-import { SectionPlaceholder } from "@/components/layout/section-placeholder"
-import { moduleCopy } from "@/lib/navigation"
+import { SettingsView } from "@/components/settings/settings-view"
+import { sampleDashboard } from "@/lib/data/sample"
+import { defaultWidgetLayout } from "@/lib/dashboard-layout"
 
 export default function SettingsPage() {
-  return <SectionPlaceholder {...moduleCopy["/settings"]} />
+  return (
+    <SettingsView
+      user={sampleDashboard.user}
+      layout={defaultWidgetLayout}
+    />
+  )
 }
