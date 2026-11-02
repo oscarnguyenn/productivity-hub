@@ -1,12 +1,29 @@
 "use client"
 
-import { useState, type ReactNode } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import { Menu, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Sidebar } from "@/components/layout/sidebar"
+import { applyAppearance, getStoredColorTheme, type ThemeMode } from "@/lib/theme"
 
 export function AppShell({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    const storedMode = window.localStorage.getItem("theme")
+    const mode: ThemeMode =
+      storedMode === "light" || storedMode === "dark" || storedMode === "system"
+        ? storedMode
+        : "system"
+    applyAppearance(mode, getStoredColorTheme())
+
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)")
+    const updateSystemTheme = () => {
+      if (mode === "system") applyAppearance("system", getStoredColorTheme())
+    }
+    mediaQuery.addEventListener("change", updateSystemTheme)
+    return () => mediaQuery.removeEventListener("change", updateSystemTheme)
+  }, [])
 
   return (
     <div className="flex min-h-dvh bg-background">

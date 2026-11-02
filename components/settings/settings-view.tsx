@@ -23,10 +23,11 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
-import type { UserProfile, WidgetLayoutItem, WidgetId } from "@/lib/types"
+import type { UserProfile, WidgetLayoutItem } from "@/lib/types"
 import { defaultWidgetLayout, widgetMeta } from "@/lib/dashboard-layout"
+import { applyAppearance, colorThemes, getStoredColorTheme, type ColorTheme, type ThemeMode } from "@/lib/theme"
 
-function getInitialTheme(): "light" | "dark" | "system" {
+function getInitialTheme(): ThemeMode {
   if (typeof window !== "undefined") {
     return (localStorage.getItem("theme") as "light" | "dark" | "system" | null) || "system"
   }
@@ -46,7 +47,8 @@ export function SettingsView({
 }) {
   const [user, setUser] = useState(initialUser)
   const [layout, setLayout] = useState(initialLayout)
-  const [theme, setTheme] = useState<"light" | "dark" | "system">(getInitialTheme)
+  const [theme, setTheme] = useState<ThemeMode>(getInitialTheme)
+  const [colorTheme, setColorTheme] = useState<ColorTheme>(getStoredColorTheme)
   const [notifications, setNotifications] = useState({
     email: true,
     push: true,
@@ -57,15 +59,10 @@ export function SettingsView({
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle")
 
   useEffect(() => {
-    // Apply theme
-    const root = document.documentElement
-    if (theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches)) {
-      root.classList.add("dark")
-    } else {
-      root.classList.remove("dark")
-    }
+    applyAppearance(theme, colorTheme)
     localStorage.setItem("theme", theme)
-  }, [theme])
+    localStorage.setItem("color-theme", colorTheme)
+  }, [theme, colorTheme])
 
   const handleSaveProfile = () => {
     setSaveStatus("saving")
@@ -91,6 +88,7 @@ export function SettingsView({
       user,
       layout,
       theme,
+      colorTheme,
       notifications,
       exportedAt: new Date().toISOString(),
     }
@@ -112,7 +110,8 @@ export function SettingsView({
         const data = JSON.parse(e.target?.result as string)
         if (data.user) setUser(data.user)
         if (data.layout) setLayout(data.layout)
-        if (data.theme) setTheme(data.theme)
+        if (data.theme === "light" || data.theme === "dark" || data.theme === "system") setTheme(data.theme)
+        if (data.colorTheme && colorThemes.some((item) => item.id === data.colorTheme)) setColorTheme(data.colorTheme)
         if (data.notifications) setNotifications(data.notifications)
         alert("Data imported successfully!")
       } catch {
@@ -242,6 +241,33 @@ export function SettingsView({
                           <p className="text-xs text-muted-foreground">{option.desc}</p>
                         </div>
                       </div>
+                    </button>
+                  ))}
+                </div>
+              </SettingsSection>
+
+              <SettingsSection title="Color palette" description="Choose an accent palette for the entire workspace">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  {colorThemes.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      aria-pressed={colorTheme === option.id}
+                      onClick={() => setColorTheme(option.id)}
+                      className={cn(
+                        "rounded-xl border-2 p-3 text-left transition-colors",
+                        colorTheme === option.id
+                          ? "border-primary bg-primary/5"
+                          : "border-border hover:border-primary/50"
+                      )}
+                    >
+                      <span className="mb-3 flex gap-1.5" aria-hidden="true">
+                        {option.colors.map((color) => (
+                          <span key={color} className="size-6 rounded-full border border-black/10" style={{ backgroundColor: color }} />
+                        ))}
+                      </span>
+                      <span className="block text-sm font-medium">{option.name}</span>
+                      <span className="mt-0.5 block text-xs text-muted-foreground">{option.description}</span>
                     </button>
                   ))}
                 </div>
