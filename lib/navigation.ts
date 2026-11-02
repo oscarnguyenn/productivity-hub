@@ -40,7 +40,7 @@ export const moduleCopy: Record<
   "/calendar": {
     title: "Calendar",
     description:
-      "A native weekly and monthly calendar will live here. FullCalendar will be added in a later increment.",
+      "Build a weekly or monthly schedule with editable events you can move and resize.",
   },
   "/tasks": {
     title: "Tasks",
@@ -55,7 +55,7 @@ export const moduleCopy: Record<
   "/notes": {
     title: "Notes",
     description:
-      "Rich-text notes with Tiptap will be added after the core dashboard is in place.",
+      "Organize documents and folders, edit with a rich-text toolbar, and save locally as you work.",
   },
   "/habits": {
     title: "Habits",

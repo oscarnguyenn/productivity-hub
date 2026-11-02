@@ -1,13 +1,11 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState } from "react"
 import {
   ChevronRight,
   ChevronDown,
   FileText,
   Folder,
-  Plus,
-  MoreHorizontal,
   Trash2,
   Edit2,
   FolderPlus,
@@ -19,6 +17,7 @@ import type { FileNode } from "@/lib/types"
 
 interface FileTreeProps {
   files: FileNode[]
+  searchQuery?: string
   selectedFileId: string | null
   onSelectFile: (file: FileNode) => void
   onCreateFile: (parentId: string | null) => void
@@ -30,6 +29,7 @@ interface FileTreeProps {
 function FileTreeNode({
   node,
   level = 0,
+  forceExpanded = false,
   selectedFileId,
   onSelectFile,
   onCreateFile,
@@ -39,6 +39,7 @@ function FileTreeNode({
 }: {
   node: FileNode
   level?: number
+  forceExpanded?: boolean
   selectedFileId: string | null
   onSelectFile: (file: FileNode) => void
   onCreateFile: (parentId: string | null) => void
@@ -46,11 +47,11 @@ function FileTreeNode({
   onRenameFile: (file: FileNode) => void
   onDeleteFile: (file: FileNode) => void
 }) {
-  const [isExpanded, setIsExpanded] = useState(node.isExpanded ?? true)
   const [isRenaming, setIsRename] = useState(false)
   const [renameValue, setRenameValue] = useState(node.name)
   const [showContextMenu, setShowContextMenu] = useState(false)
   const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 })
+  const expanded = forceExpanded || (node.isExpanded ?? true)
 
   const handleClick = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -60,7 +61,7 @@ function FileTreeNode({
   const handleDoubleClick = (e: React.MouseEvent) => {
     e.stopPropagation()
     if (node.type === "folder") {
-      setIsExpanded(!isExpanded)
+      onSelectFile(node)
     }
   }
 
@@ -105,7 +106,7 @@ function FileTreeNode({
   }
 
   const Icon = node.type === "folder" ? Folder : FileText
-  const Chevron = isExpanded ? ChevronDown : ChevronRight
+  const Chevron = expanded ? ChevronDown : ChevronRight
 
   return (
     <>
@@ -124,10 +125,10 @@ function FileTreeNode({
           <button
             onClick={(e) => {
               e.stopPropagation()
-              setIsExpanded(!isExpanded)
+              onSelectFile(node)
             }}
             className="p-0.5 text-muted-foreground hover:text-foreground transition-colors"
-            aria-label={isExpanded ? "Collapse" : "Expand"}
+            aria-label={expanded ? "Collapse" : "Expand"}
           >
             <Chevron className="size-4" />
           </button>
@@ -148,13 +149,14 @@ function FileTreeNode({
           <span className="flex-1 min-w-0 truncate text-sm font-medium">{node.name}</span>
         )}
       </div>
-      {node.type === "folder" && isExpanded && node.children && (
+      {node.type === "folder" && expanded && node.children && (
         <div className="ml-4">
           {node.children.map((child) => (
             <FileTreeNode
               key={child.id}
               node={child}
               level={level + 1}
+              forceExpanded={forceExpanded}
               selectedFileId={selectedFileId}
               onSelectFile={onSelectFile}
               onCreateFile={onCreateFile}
@@ -209,6 +211,7 @@ function FileTreeNode({
 
 export function FileTree({
   files,
+  searchQuery = "",
   selectedFileId,
   onSelectFile,
   onCreateFile,
@@ -246,8 +249,8 @@ export function FileTree({
       {files.length === 0 ? (
         <div className="text-center py-8 text-muted-foreground">
           <Folder className="size-12 mx-auto mb-3 opacity-30" />
-          <p className="text-sm">No files or folders yet</p>
-          <p className="text-xs mt-1">Create your first document or folder</p>
+          <p className="text-sm">{searchQuery ? "No matching files" : "No files or folders yet"}</p>
+          {!searchQuery && <p className="text-xs mt-1">Create your first document or folder</p>}
         </div>
       ) : (
         <div>
@@ -255,6 +258,7 @@ export function FileTree({
             <FileTreeNode
               key={file.id}
               node={file}
+              forceExpanded={Boolean(searchQuery)}
               selectedFileId={selectedFileId}
               onSelectFile={onSelectFile}
               onCreateFile={onCreateFile}
