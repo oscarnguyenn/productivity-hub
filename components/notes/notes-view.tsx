@@ -130,14 +130,32 @@ export function NotesView({
   const [moveTarget, setMoveTarget] = useState<FileNode | null>(null)
   const [switcherOpen, setSwitcherOpen] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const [editorRevision, setEditorRevision] = useState(0)
   const importRef = useRef<HTMLInputElement>(null)
   const filesRef = useRef(files)
+  const selectedIdRef = useRef(selectedId)
+  const openIdsRef = useRef(openIds)
 
   useEffect(() => {
     filesRef.current = files
-  }, [files])
+    selectedIdRef.current = selectedId
+    openIdsRef.current = openIds
+  }, [files, selectedId, openIds])
 
-  const autosave = useNotesAutosave(files, ready && !loadError)
+  // Another browser tab saved notes: show its work (merged with ours) and remount the editor if the open document changed.
+  const handleExternalChange = useCallback((next: FileNode[]) => {
+    const activeId = selectedIdRef.current
+    const before = activeId ? findNode(filesRef.current, activeId) : null
+    const after = activeId ? findNode(next, activeId) : null
+    const remaining = openIdsRef.current.filter((id) => findNode(next, id)?.type === "document")
+    filesRef.current = next
+    setFiles(next)
+    setOpenIds(remaining)
+    if (activeId && after?.type !== "document") setSelectedId(remaining[0] ?? null)
+    else if (before?.content !== after?.content) setEditorRevision((revision) => revision + 1)
+  }, [])
+
+  const autosave = useNotesAutosave(files, ready && !loadError, handleExternalChange)
 
   useEffect(() => {
     if (ready && !loadError) onUpdateDashboard?.({ files })
@@ -290,12 +308,17 @@ export function NotesView({
 
   const confirmDelete = useCallback(() => {
     if (!deleteTarget) return
-    const removed = collectIds(deleteTarget)
+    const removed = new Set(collectIds(deleteTarget))
+    const remaining = openIds.filter((id) => !removed.has(id))
     setFiles((current) => removeNode(current, deleteTarget.id))
-    setOpenIds((current) => current.filter((id) => !removed.includes(id)))
-    setSelectedId((current) => (current && removed.includes(current) ? null : current))
+    setOpenIds(remaining)
+    if (selectedId && removed.has(selectedId)) {
+      // Fall back to a neighbouring open tab, like closing the tab would.
+      const position = openIds.slice(0, openIds.indexOf(selectedId)).filter((id) => !removed.has(id)).length
+      setSelectedId(remaining[Math.max(0, position - 1)] ?? null)
+    }
     setDeleteTarget(null)
-  }, [deleteTarget])
+  }, [deleteTarget, openIds, selectedId])
 
   const actions = useMemo<FileTreeActions>(
     () => ({
@@ -502,9 +525,10 @@ export function NotesView({
                 </div>
               )}
               <TiptapEditor
-                key={selectedDoc.id}
+                key={`${selectedDoc.id}:${editorRevision}`}
                 content={selectedDoc.content || ""}
                 onChange={(content) => setFiles((current) => updateNode(current, selectedDoc.id, { content }))}
+                onSave={() => void autosave.retry()}
                 placeholder="Start writing, or type / for formatting…"
                 onNewDocument={() => requestCreate("document", null)}
                 title={selectedDoc.name}
