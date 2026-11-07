@@ -6,6 +6,7 @@ import {
   FolderKanban,
   Gauge,
   LayoutDashboard,
+  LibraryBig,
   LineChart,
   NotebookPen,
   Repeat,
@@ -28,6 +29,7 @@ export const primaryNav: NavItem[] = [
   { href: "/habits", label: "Habits", icon: Repeat },
   { href: "/goals", label: "Goals", icon: Target },
   { href: "/study", label: "Study Tracker", icon: BookOpenCheck },
+  { href: "/resources", label: "VCE Resources", icon: LibraryBig },
   { href: "/insights", label: "Insights", icon: LineChart },
 ]
 
@@ -78,6 +80,11 @@ export const moduleCopy: Record<
     title: "SAC & exam tracker",
     description:
       "Track assessment results, exam dates, study sessions, and spaced-repetition reviews.",
+  },
+  "/resources": {
+    title: "VCE resources",
+    description:
+      "Browse VCE resources, preview files in the app, and manage shared and personal libraries.",
   },
   "/settings": {
     title: "Settings",
