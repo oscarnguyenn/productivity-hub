@@ -153,7 +153,7 @@ export async function POST(request: NextRequest) {
       return jsonError(`Could not check the shared storage limit: ${usageError.message}`, 500)
     }
     if (Number(usedBytes) + body.byteSize > MAX_SHARED_VCE_STORAGE_BYTES) {
-      return jsonError("This file would exceed the 10 GB shared-library storage limit.", 409)
+      return jsonError("This file would exceed the 20 GB shared-library storage limit.", 409)
     }
 
     const storagePath = `shared/${body.id}`

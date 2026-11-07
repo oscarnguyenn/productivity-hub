@@ -414,7 +414,7 @@ async function uploadSourceStreamAsMultipart(
       if (partBytes === 0) break
       actualSize += partBytes
       if (actualSize > MAX_SHARED_VCE_FILE_BYTES) {
-        throw new Error("The source file exceeds the Cloudflare R2 10 GB app limit.")
+        throw new Error("The source file exceeds the Cloudflare R2 20 GB app limit.")
       }
 
       if (!urlBatch.has(partNumber)) {
@@ -535,7 +535,7 @@ async function importSourceFile(
     : entry.byteSize
   if (expectedSize === null) throw new Error(`${entry.name} has no reliable size information and cannot be safely imported.`)
   if (expectedSize > MAX_SHARED_VCE_FILE_BYTES) {
-    throw new Error(`${entry.name} exceeds the 10 GB shared-library per-file limit.`)
+    throw new Error(`${entry.name} exceeds the 20 GB shared-library per-file limit.`)
   }
   const mimeType = (
     response.headers.get("content-type")?.split(";")[0] ||
@@ -940,7 +940,7 @@ export function VceResourcesView() {
     }
     if (selectedBytes > availableBytes) {
       setSourceError(
-        `The selected subjects total about ${formatStorageBytes(selectedBytes)}, but only ${formatStorageBytes(Math.max(availableBytes, 0))} remain under the 10 GB R2 limit. ` +
+        `The selected subjects total about ${formatStorageBytes(selectedBytes)}, but only ${formatStorageBytes(Math.max(availableBytes, 0))} remain under the 20 GB R2 limit. ` +
         "Leave out one or more whole subjects before copying."
       )
       return
@@ -1044,7 +1044,7 @@ export function VceResourcesView() {
         : ""
       const sizeLimitGroups = sourceImportGroups.filter((group) => group.oversizedFiles.length > 0)
       const sizeLimitSummary = sizeLimitGroups.length
-          ? `${sizeLimitGroups.length} whole subject(s) were left out because at least one file exceeds the 10 GB shared-library per-file limit.`
+          ? `${sizeLimitGroups.length} whole subject(s) were left out because at least one file exceeds the 20 GB shared-library per-file limit.`
         : ""
       if (failedSubjects.length) {
         const examples = failedSubjects.slice(0, 5).join(" | ")
@@ -1820,7 +1820,7 @@ export function VceResourcesView() {
               <h2 id="vce-import-title" className="text-lg font-semibold">Choose whole subjects to copy</h2>
               <p id="vce-import-description" className="mt-1 text-sm text-muted-foreground">
                 The scan found {pendingImport.files.length.toLocaleString()} files from {pendingImport.label}; the new files to copy are estimated at {formatStorageBytes(pendingImport.estimatedBytes)}.
-                {" "}Choose whole subject groups to copy into Cloudflare R2. The Hub caps shared files at 10 GB total; private uploads remain in Supabase.
+                {" "}Choose whole subject groups to copy into Cloudflare R2. The Hub caps shared files at 20 GB total; private uploads remain in Supabase.
                 {pendingImport.unknownSizes > 0
                   ? ` ${pendingImport.unknownSizes.toLocaleString()} file size(s) are unknown; actual sizes will be checked during import, and an over-limit subject will be rolled back as a whole.`
                   : ""}
@@ -1870,7 +1870,7 @@ export function VceResourcesView() {
                         )}
                         {group.oversizedFiles.length > 0 && (
                           <span className="mt-1 block text-xs text-destructive">
-                            Not selectable: at least one file is over the 10 GB shared-library per-file limit ({group.oversizedFiles.slice(0, 2).map((file) => `${file.name} (${formatStorageBytes(file.byteSize ?? 0)})`).join(", ")}).
+                            Not selectable: at least one file is over the 20 GB shared-library per-file limit ({group.oversizedFiles.slice(0, 2).map((file) => `${file.name} (${formatStorageBytes(file.byteSize ?? 0)})`).join(", ")}).
                           </span>
                         )}
                       </span>
