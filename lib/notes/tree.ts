@@ -295,3 +295,51 @@ export function searchDocuments(docs: DocumentEntry[], query: string, titles: Ma
 export function noteHref(id: string): string {
   return `${NOTE_LINK_PREFIX}${id}`
 }
+
+function flattenAll(nodes: FileNode[]): FileNode[] {
+  return nodes.flatMap((node) => [node, ...flattenAll(node.children ?? [])])
+}
+
+function nodeFields(node: FileNode) {
+  const { children, parentId, ...fields } = node
+  void children
+  void parentId
+  return fields
+}
+
+/**
+ * Re-applies this tab's unsaved edits (the difference between `base` and `local`) onto the tree another tab
+ * just saved (`remote`), so a stale tab never overwrites newer work. When both tabs edited the same node the
+ * most recently updated copy wins; a node deleted remotely stays deleted.
+ */
+export function mergeNotesTrees(base: FileNode[], local: FileNode[], remote: FileNode[]): FileNode[] {
+  const baseById = new Map(flattenAll(base).map((node) => [node.id, node]))
+  const localNodes = flattenAll(local)
+  const localIds = new Set(localNodes.map((node) => node.id))
+  let result = remote
+
+  for (const id of baseById.keys()) {
+    if (!localIds.has(id) && findNode(result, id)) result = removeNode(result, id)
+  }
+
+  for (const node of localNodes) {
+    const before = baseById.get(node.id)
+    const current = findNode(result, node.id)
+    if (!before) {
+      if (current) continue
+      const parent = node.parentId && findNode(result, node.parentId)?.type === "folder" ? node.parentId : null
+      result = insertNode(result, parent, { ...node, children: node.type === "folder" ? [] : undefined })
+      continue
+    }
+    if (!current) continue
+    const edited = JSON.stringify(nodeFields(before)) !== JSON.stringify(nodeFields(node))
+    if (edited && current.updatedAt <= node.updatedAt) {
+      result = updateNode(result, node.id, nodeFields(node), false)
+    }
+    if (before.parentId !== node.parentId) {
+      const parent = node.parentId && findNode(result, node.parentId)?.type === "folder" ? node.parentId : null
+      result = moveNode(result, node.id, parent) ?? result
+    }
+  }
+  return result
+}

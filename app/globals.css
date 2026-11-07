@@ -330,6 +330,15 @@
     visibility: hidden !important;
   }
 
+  /* The app shell clips and offsets its children; release every ancestor so long notes paginate from the page origin. */
+  :has(.note-document-print) {
+    position: static !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
   .note-document-print,
   .note-document-print * {
     visibility: visible !important;
@@ -355,6 +364,10 @@
   .note-editor-scroll {
     overflow: visible !important;
     padding: 0 !important;
+  }
+
+  .note-editor-scroll > div[style*="zoom"] {
+    zoom: 1 !important;
   }
 
   .print-document-title {

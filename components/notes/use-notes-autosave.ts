@@ -1,9 +1,10 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import { isSupabaseConfigured } from "@/lib/supabase/client"
 import { saveUserData } from "@/lib/user-data"
 import type { FileNode } from "@/lib/types"
-import { NOTES_STORAGE_KEY } from "@/lib/notes/tree"
+import { NOTES_STORAGE_KEY, isFileNode, mergeNotesTrees } from "@/lib/notes/tree"
 
 export type SaveStatus = "saved" | "dirty" | "saving" | "error"
 
@@ -11,7 +12,8 @@ const SAVE_DELAY_MS = 800
 const RETRY_DELAY_MS = 10_000
 
 // Debounced persistence. "saved" is only reported after saveUserData has resolved for the latest edit.
-export function useNotesAutosave(files: FileNode[], enabled: boolean) {
+// `onExternalChange` receives the tree to show when another browser tab saved notes (local mode only).
+export function useNotesAutosave(files: FileNode[], enabled: boolean, onExternalChange?: (files: FileNode[]) => void) {
   const [status, setStatus] = useState<SaveStatus>("saved")
   const [error, setError] = useState<string | null>(null)
   const [savedAt, setSavedAt] = useState<Date | null>(null)
@@ -21,10 +23,12 @@ export function useNotesAutosave(files: FileNode[], enabled: boolean) {
   const savingRef = useRef(false)
   const timerRef = useRef<number | null>(null)
   const mountedRef = useRef(true)
+  const externalChangeRef = useRef(onExternalChange)
 
   useEffect(() => {
     filesRef.current = files
-  }, [files])
+    externalChangeRef.current = onExternalChange
+  }, [files, onExternalChange])
 
   const clearTimer = () => {
     if (timerRef.current !== null) window.clearTimeout(timerRef.current)
@@ -79,6 +83,27 @@ export function useNotesAutosave(files: FileNode[], enabled: boolean) {
   }, [files, enabled, save])
 
   useEffect(() => {
+    if (!enabled || isSupabaseConfigured()) return
+    const handleStorage = (event: StorageEvent) => {
+      if (event.storageArea !== window.localStorage || event.key !== NOTES_STORAGE_KEY || !event.newValue) return
+      let remote: unknown
+      try {
+        remote = JSON.parse(event.newValue)
+      } catch {
+        return
+      }
+      if (!Array.isArray(remote) || !remote.every(isFileNode)) return
+      const base = savedRef.current ?? filesRef.current
+      const merged = filesRef.current === base ? remote : mergeNotesTrees(base, filesRef.current, remote)
+      savedRef.current = remote
+      filesRef.current = merged
+      externalChangeRef.current?.(merged)
+    }
+    window.addEventListener("storage", handleStorage)
+    return () => window.removeEventListener("storage", handleStorage)
+  }, [enabled])
+
+  useEffect(() => {
     mountedRef.current = true
     const flush = () => {
       if (filesRef.current !== savedRef.current && savedRef.current !== null) void save()
@@ -86,6 +111,8 @@ export function useNotesAutosave(files: FileNode[], enabled: boolean) {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       if (savedRef.current === null || (filesRef.current === savedRef.current && !savingRef.current)) return
       flush()
+      // Local saves are synchronous, so only a remote save can still be lost when the page closes.
+      if (!isSupabaseConfigured()) return
       event.preventDefault()
       event.returnValue = ""
     }

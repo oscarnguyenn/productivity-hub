@@ -64,6 +64,9 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import { NOTE_LINK_PREFIX } from "@/lib/notes/content"
+import { buildHtmlDocument, safeFileName } from "@/lib/notes/export-html"
+import { normaliseLinkUrl } from "@/lib/notes/link-url"
+import { computeTextStats, formatTextStats } from "@/lib/notes/text-stats"
 import type { DocumentEntry } from "@/lib/notes/tree"
 import { DocumentPicker } from "./notes-dialogs"
 
@@ -156,6 +159,7 @@ const cellColors = [
   { name: "Pink", value: "#fbcfe8" },
 ]
 const MAX_TABLE_CELLS = 2500
+const ZOOM_LEVELS = [50, 75, 90, 100, 125, 150, 200]
 
 function withCellBackground(extension: typeof TableCell | typeof TableHeader) {
   return extension.extend({
@@ -217,6 +221,7 @@ interface TiptapEditorProps {
   currentDocumentId?: string
   onNavigateToDocument?: (id: string) => void
   onExportMarkdown?: () => void
+  onSave?: () => void
 }
 
 function MenuButton({
@@ -241,6 +246,7 @@ function MenuButton({
       disabled={disabled}
       title={title}
       aria-label={title}
+      aria-pressed={isActive}
       className={cn("h-8 w-8", isActive && "text-primary")}
     >
       {children}
@@ -271,12 +277,14 @@ export function TiptapEditor({
   currentDocumentId,
   onNavigateToDocument,
   onExportMarkdown,
+  onSave,
 }: TiptapEditorProps) {
   const [mathDialog, setMathDialog] = useState<MathDialogState | null>(null)
   const [docPickerOpen, setDocPickerOpen] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const fontSizeEditedRef = useRef(false)
   const navigateRef = useRef(onNavigateToDocument)
   useEffect(() => {
     navigateRef.current = onNavigateToDocument
@@ -396,11 +404,7 @@ export function TiptapEditor({
     editor.view.dom.setAttribute("spellcheck", String(spellcheckEnabled))
   }, [editor, isReadOnly, spellcheckEnabled])
 
-  const text = editor?.getText() ?? ""
-  const wordCount = {
-    characters: text.length,
-    words: text.trim() ? text.trim().split(/\s+/).length : 0,
-  }
+  const stats = computeTextStats(editor?.getText({ blockSeparator: "\n" }) ?? "")
 
   const openLinkDialog = useCallback(() => {
     if (!editor) return
@@ -411,12 +415,13 @@ export function TiptapEditor({
 
   const handleLinkConfirm = useCallback(() => {
     if (!editor) return
-    const url = linkUrl.trim()
+    const url = normaliseLinkUrl(linkUrl)
     if (!url) {
       editor.chain().focus().unsetLink().run()
+    } else if (editor.state.selection.empty && !editor.isActive("link")) {
+      editor.chain().focus().insertContent({ type: "text", text: url.replace(/^mailto:/i, ""), marks: [{ type: "link", attrs: { href: url } }] }).run()
     } else {
-      const normalizedUrl = /^(https?:|mailto:|tel:)/i.test(url) ? url : `https://${url}`
-      editor.chain().focus().setLink({ href: normalizedUrl }).run()
+      editor.chain().focus().setLink({ href: url }).run()
     }
     setLinkUrl("")
     setDialog(null)
@@ -569,14 +574,11 @@ export function TiptapEditor({
 
   const downloadDocument = useCallback(() => {
     if (!editor) return
-    const blob = new Blob(
-      [`<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body>${editor.getHTML()}</body></html>`],
-      { type: "text/html;charset=utf-8" }
-    )
+    const blob = new Blob([buildHtmlDocument(title, editor.getHTML())], { type: "text/html;charset=utf-8" })
     const url = URL.createObjectURL(blob)
     const link = document.createElement("a")
     link.href = url
-    link.download = `${title.trim() || "document"}.html`
+    link.download = safeFileName(title, "html")
     link.click()
     window.setTimeout(() => URL.revokeObjectURL(url), 1000)
     setActiveMenu(null)
@@ -591,8 +593,24 @@ export function TiptapEditor({
     const numericSize = Number(size)
     if (!Number.isInteger(numericSize) || numericSize < 8 || numericSize > 96) return
     setSelectedFontSize(String(numericSize))
+    fontSizeEditedRef.current = false
     editor?.chain().focus().setMark("textStyle", { fontSize: `${numericSize}pt` }).run()
   }, [editor])
+
+  const applyFontFamily = useCallback((family: string) => {
+    if (!editor) return
+    const chain = editor.chain().focus()
+    if (family) chain.setMark("textStyle", { fontFamily: family }).run()
+    else chain.setMark("textStyle", { fontFamily: null }).removeEmptyTextStyle().run()
+  }, [editor])
+
+  const stepZoom = useCallback((direction: 1 | -1) => {
+    setZoom((value) => {
+      const index = ZOOM_LEVELS.findIndex((level) => level >= value)
+      if (direction > 0) return ZOOM_LEVELS.find((level) => level > value) ?? value
+      return ZOOM_LEVELS[Math.max(0, (index < 0 ? ZOOM_LEVELS.length : index) - 1)]
+    })
+  }, [])
 
   useEffect(() => {
     if (!editor) return
@@ -607,6 +625,7 @@ export function TiptapEditor({
         setDialog("find")
       } else if (key === "s") {
         event.preventDefault()
+        onSave?.()
       } else if (key === "p") {
         event.preventDefault()
         window.print()
@@ -614,7 +633,22 @@ export function TiptapEditor({
     }
     document.addEventListener("keydown", handleShortcut)
     return () => document.removeEventListener("keydown", handleShortcut)
-  }, [editor, openLinkDialog])
+  }, [editor, onSave, openLinkDialog])
+
+  const dialogOpen = dialog !== null || mathDialog !== null || showTableDialog
+  useEffect(() => {
+    if (!dialogOpen) return
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return
+      event.stopPropagation()
+      setDialog(null)
+      setMathDialog(null)
+      setShowTableDialog(false)
+      editor?.commands.focus()
+    }
+    document.addEventListener("keydown", handleEscape, true)
+    return () => document.removeEventListener("keydown", handleEscape, true)
+  }, [dialogOpen, editor])
 
   const menuItems: Record<(typeof documentMenus)[number], MenuItem[]> = {
     File: [
@@ -630,8 +664,8 @@ export function TiptapEditor({
       { label: "Find in document", shortcut: "Ctrl+F", action: () => { setDialog("find"); setActiveMenu(null) } },
     ],
     View: [
-      { label: "Zoom in", action: () => setZoom((value) => Math.min(200, value + 10)) },
-      { label: "Zoom out", action: () => setZoom((value) => Math.max(50, value - 10)) },
+      { label: "Zoom in", action: () => stepZoom(1) },
+      { label: "Zoom out", action: () => stepZoom(-1) },
       { label: readingMode ? "Exit reading mode" : "Reading mode", action: () => setReadingMode((value) => !value) },
       { label: focusMode ? "Exit focus view" : "Focus view", action: () => onToggleFocus?.() },
     ],
@@ -751,7 +785,7 @@ export function TiptapEditor({
           className="h-8 rounded-md bg-transparent px-1.5 text-xs hover:bg-muted"
           aria-label="Zoom"
         >
-          {[50, 75, 90, 100, 125, 150, 200].map((value) => <option key={value} value={value}>{value}%</option>)}
+          {ZOOM_LEVELS.map((value) => <option key={value} value={value}>{value}%</option>)}
         </select>
         <select
           value={headingValue}
@@ -771,9 +805,7 @@ export function TiptapEditor({
         </select>
         <select
           value={String(editor.getAttributes("textStyle").fontFamily ?? "")}
-          onChange={(event) => {
-            if (event.target.value) editor.chain().focus().setMark("textStyle", { fontFamily: event.target.value }).run()
-          }}
+          onChange={(event) => applyFontFamily(event.target.value)}
           disabled={isReadOnly}
           className="h-8 w-28 rounded-md bg-transparent px-1.5 text-xs hover:bg-muted"
           aria-label="Font family"
@@ -786,8 +818,13 @@ export function TiptapEditor({
           min={8}
           max={96}
           value={selectedFontSize}
-          onChange={(event) => setSelectedFontSize(event.target.value)}
-          onBlur={(event) => applyFontSize(event.target.value)}
+          onChange={(event) => {
+            fontSizeEditedRef.current = true
+            setSelectedFontSize(event.target.value)
+          }}
+          onBlur={(event) => {
+            if (fontSizeEditedRef.current) applyFontSize(event.target.value)
+          }}
           onKeyDown={(event) => event.key === "Enter" && applyFontSize(event.currentTarget.value)}
           disabled={isReadOnly}
           className="h-8 w-14 rounded-md border border-border bg-background px-1.5 text-center text-xs"
@@ -938,7 +975,7 @@ export function TiptapEditor({
           <MenuButton onClick={openTableDialog} disabled={isReadOnly} title="Insert table">
             <TableIcon className="size-4" />
           </MenuButton>
-          <MenuButton onClick={() => editor.chain().focus().setBlockquote().run()} isActive={editor.isActive("blockquote")} disabled={isReadOnly} title="Block quote">
+          <MenuButton onClick={() => editor.chain().focus().toggleBlockquote().run()} isActive={editor.isActive("blockquote")} disabled={isReadOnly} title="Block quote">
             <Quote className="size-4" />
           </MenuButton>
           <MenuButton onClick={() => editor.chain().focus().toggleCodeBlock().run()} isActive={editor.isActive("codeBlock")} disabled={isReadOnly} title="Code block">
@@ -1017,8 +1054,8 @@ export function TiptapEditor({
             )}
           </div>
         )}
-        <span className="ml-auto hidden items-center gap-2 pr-2 text-xs text-muted-foreground xl:flex">
-          {wordCount.words} words · {wordCount.characters} characters
+        <span className="ml-auto hidden items-center gap-2 pr-2 text-xs text-muted-foreground md:flex">
+          {formatTextStats(stats)}
         </span>
       </div>
 
@@ -1086,9 +1123,9 @@ export function TiptapEditor({
 
       {dialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}>
-          <div role="dialog" aria-modal="true" className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-xl">
+          <div role="dialog" aria-modal="true" aria-labelledby="document-dialog-title" className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-xl">
             <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-lg font-semibold">
+              <h2 id="document-dialog-title" className="text-lg font-semibold">
                 {dialog === "link" ? "Insert link" : dialog === "find" ? "Find in document" : dialog === "word-count" ? "Word count" : "Keyboard shortcuts"}
               </h2>
               <Button variant="ghost" size="icon-sm" aria-label="Close dialog" onClick={() => setDialog(null)}>
@@ -1137,9 +1174,9 @@ export function TiptapEditor({
               </div>
             ) : dialog === "word-count" ? (
               <div className="grid grid-cols-2 gap-3 text-sm">
-                <div className="rounded-lg bg-muted p-3"><strong className="block text-xl">{wordCount.words}</strong><span className="text-muted-foreground">Words</span></div>
-                <div className="rounded-lg bg-muted p-3"><strong className="block text-xl">{wordCount.characters}</strong><span className="text-muted-foreground">Characters</span></div>
-                <div className="rounded-lg bg-muted p-3"><strong className="block text-xl">{editor.getText().replace(/\s/g, "").length}</strong><span className="text-muted-foreground">Characters without spaces</span></div>
+                <div className="rounded-lg bg-muted p-3"><strong className="block text-xl">{stats.words}</strong><span className="text-muted-foreground">Words</span></div>
+                <div className="rounded-lg bg-muted p-3"><strong className="block text-xl">{stats.characters}</strong><span className="text-muted-foreground">Characters</span></div>
+                <div className="rounded-lg bg-muted p-3"><strong className="block text-xl">{stats.charactersNoSpaces}</strong><span className="text-muted-foreground">Characters without spaces</span></div>
                 <div className="rounded-lg bg-muted p-3"><strong className="block text-xl">{editor.state.doc.childCount}</strong><span className="text-muted-foreground">Paragraphs and blocks</span></div>
               </div>
             ) : (
