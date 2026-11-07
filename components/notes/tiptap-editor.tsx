@@ -1,7 +1,11 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useEditor, EditorContent } from "@tiptap/react"
+import { Node as TiptapNode, mergeAttributes } from "@tiptap/core"
+import { BlockMath, InlineMath } from "@tiptap/extension-mathematics"
+import katex from "katex"
+import "katex/dist/katex.min.css"
 import StarterKit from "@tiptap/starter-kit"
 import Placeholder from "@tiptap/extension-placeholder"
 import Link from "@tiptap/extension-link"
@@ -32,6 +36,11 @@ import {
   Maximize2,
   Minimize2,
   Highlighter,
+  FileText,
+  FileUp,
+  IndentDecrease,
+  IndentIncrease,
+  Sigma,
   Image as ImageIcon,
   Italic,
   Link as LinkIcon,
@@ -54,9 +63,69 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
+import { NOTE_LINK_PREFIX } from "@/lib/notes/content"
+import type { DocumentEntry } from "@/lib/notes/tree"
+import { DocumentPicker } from "./notes-dialogs"
 
 const lowlight = createLowlight(common)
-const documentMenus = ["File", "Edit", "View", "Insert", "Format", "Tools", "Extensions", "Help"] as const
+const documentMenus = ["File", "Edit", "View", "Insert", "Format", "Tools", "Help"] as const
+const MAX_IMAGE_BYTES = 1_500_000
+const MAX_ATTACHMENT_BYTES = 3_000_000
+
+const Attachment = TiptapNode.create({
+  name: "attachment",
+  group: "block",
+  atom: true,
+  draggable: true,
+  addAttributes() {
+    return {
+      name: { default: "file" },
+      size: { default: 0 },
+      type: { default: "" },
+      data: { default: "" },
+    }
+  },
+  parseHTML() {
+    return [{ tag: "div[data-attachment]" }]
+  },
+  renderHTML({ node, HTMLAttributes }) {
+    const { name, size, type, data } = node.attrs
+    return [
+      "div",
+      mergeAttributes(HTMLAttributes, { "data-attachment": "true", class: "note-attachment" }),
+      ["a", { href: data, "data-attachment-link": "true", "data-type": type, download: name }, `📎 ${name}`],
+      ["span", {}, ` ${(Number(size) / 1024).toFixed(0)} KB${type === "application/pdf" ? " · PDF (click to open)" : ""}`],
+    ]
+  },
+})
+
+function dataUrlToBlobUrl(dataUrl: string) {
+  const [meta, body = ""] = dataUrl.split(",")
+  const mime = /data:([^;]+)/.exec(meta)?.[1] ?? "application/octet-stream"
+  const binary = atob(body)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return URL.createObjectURL(new Blob([bytes], { type: mime }))
+}
+
+function readAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read file"))
+    reader.readAsDataURL(file)
+  })
+}
+
+type MathDialogState = { kind: "inline" | "block"; pos: number | null; latex: string }
+
+function renderLatex(latex: string, displayMode: boolean) {
+  try {
+    return { html: katex.renderToString(latex || "\\;", { displayMode, throwOnError: true }), error: null }
+  } catch (error) {
+    return { html: "", error: error instanceof Error ? error.message : "Invalid LaTeX" }
+  }
+}
 const fontFamilies = ["Arial", "Georgia", "Times New Roman", "Verdana", "Courier New"]
 const highlightColors = [
   { name: "Yellow", value: "#fff176" },
@@ -131,7 +200,7 @@ const defaultContent = {
   content: [{ type: "paragraph", content: [] }],
 }
 
-type DocumentDialog = "find" | "link" | "word-count" | "help" | "extensions" | null
+type DocumentDialog = "find" | "link" | "word-count" | "help" | null
 type MenuItem = { label: string; shortcut?: string; action: () => void; disabled?: boolean }
 
 interface TiptapEditorProps {
@@ -143,6 +212,11 @@ interface TiptapEditorProps {
   title?: string
   focusMode?: boolean
   onToggleFocus?: () => void
+  documents?: DocumentEntry[]
+  recentIds?: string[]
+  currentDocumentId?: string
+  onNavigateToDocument?: (id: string) => void
+  onExportMarkdown?: () => void
 }
 
 function MenuButton({
@@ -192,7 +266,21 @@ export function TiptapEditor({
   title = "Untitled document",
   focusMode = false,
   onToggleFocus,
+  documents = [],
+  recentIds = [],
+  currentDocumentId,
+  onNavigateToDocument,
+  onExportMarkdown,
 }: TiptapEditorProps) {
+  const [mathDialog, setMathDialog] = useState<MathDialogState | null>(null)
+  const [docPickerOpen, setDocPickerOpen] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const imageInputRef = useRef<HTMLInputElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const navigateRef = useRef(onNavigateToDocument)
+  useEffect(() => {
+    navigateRef.current = onNavigateToDocument
+  }, [onNavigateToDocument])
   const [activeMenu, setActiveMenu] = useState<string | null>(null)
   const [dialog, setDialog] = useState<DocumentDialog>(null)
   const [linkUrl, setLinkUrl] = useState("")
@@ -219,11 +307,23 @@ export function TiptapEditor({
       Placeholder.configure({ placeholder }),
       Link.configure({
         openOnClick: false,
+        protocols: [{ scheme: "note" }],
         HTMLAttributes: { class: "text-primary underline hover:no-underline" },
       }),
       Image.configure({
+        allowBase64: true,
         HTMLAttributes: { class: "max-w-full rounded-lg" },
+        resize: { enabled: true, minWidth: 50, minHeight: 50, alwaysPreserveAspectRatio: true },
       }),
+      InlineMath.configure({
+        katexOptions: { throwOnError: false },
+        onClick: (node, pos) => setMathDialog({ kind: "inline", pos, latex: String(node.attrs.latex ?? "") }),
+      }),
+      BlockMath.configure({
+        katexOptions: { throwOnError: false },
+        onClick: (node, pos) => setMathDialog({ kind: "block", pos, latex: String(node.attrs.latex ?? "") }),
+      }),
+      Attachment,
       Table.configure({ resizable: true, cellMinWidth: 96, handleWidth: 8 }),
       TableRow,
       withCellBackground(TableCell),
@@ -242,6 +342,38 @@ export function TiptapEditor({
       attributes: {
         class: "prose prose-sm dark:prose-invert mx-auto min-h-[720px] max-w-[816px] bg-white px-16 py-14 text-zinc-900 shadow-sm focus:outline-none dark:bg-zinc-950 dark:text-zinc-100",
         spellcheck: "true",
+      },
+      handleClick: (_view, _pos, event) => {
+        const target = event.target as HTMLElement
+        const anchor = target.closest("a")
+        if (anchor?.hasAttribute("data-attachment-link")) {
+          event.preventDefault()
+          const data = anchor.getAttribute("href") ?? ""
+          if (data.startsWith("data:")) {
+            const url = dataUrlToBlobUrl(data)
+            if (anchor.getAttribute("data-type") === "application/pdf") {
+              window.open(url, "_blank", "noopener")
+            } else {
+              const link = document.createElement("a")
+              link.href = url
+              link.download = anchor.getAttribute("download") ?? "file"
+              link.click()
+            }
+            window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+          }
+          return true
+        }
+        const href = anchor?.getAttribute("href") ?? ""
+        if (href.startsWith(NOTE_LINK_PREFIX)) {
+          event.preventDefault()
+          navigateRef.current?.(href.slice(NOTE_LINK_PREFIX.length))
+          return true
+        }
+        if (anchor && (event.ctrlKey || event.metaKey) && /^(https?:|mailto:|tel:)/i.test(href)) {
+          window.open(href, "_blank", "noopener,noreferrer")
+          return true
+        }
+        return false
       },
     },
     onUpdate: ({ editor: currentEditor }) => {
@@ -295,6 +427,88 @@ export function TiptapEditor({
     const url = window.prompt("Enter an image URL")
     if (url?.trim()) editor.chain().focus().setImage({ src: url.trim() }).run()
     setActiveMenu(null)
+  }, [editor])
+
+  const uploadImages = useCallback(async (fileList: FileList | null) => {
+    if (!editor) return
+    setUploadError(null)
+    for (const file of Array.from(fileList ?? [])) {
+      if (!file.type.startsWith("image/")) {
+        setUploadError(`${file.name} is not an image.`)
+        continue
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        setUploadError(`${file.name} is larger than ${(MAX_IMAGE_BYTES / 1e6).toFixed(1)} MB. Images are stored inside the note, so use a smaller file or an image URL.`)
+        continue
+      }
+      try {
+        editor.chain().focus().setImage({ src: await readAsDataUrl(file), alt: file.name }).run()
+      } catch {
+        setUploadError(`Could not read ${file.name}.`)
+      }
+    }
+    if (imageInputRef.current) imageInputRef.current.value = ""
+  }, [editor])
+
+  const uploadAttachments = useCallback(async (fileList: FileList | null) => {
+    if (!editor) return
+    setUploadError(null)
+    for (const file of Array.from(fileList ?? [])) {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setUploadError(`${file.name} is larger than ${(MAX_ATTACHMENT_BYTES / 1e6).toFixed(0)} MB. Attachments are stored inside the note in this browser, so large files aren't supported.`)
+        continue
+      }
+      try {
+        const data = await readAsDataUrl(file)
+        editor.chain().focus().insertContent({ type: "attachment", attrs: { name: file.name, size: file.size, type: file.type, data } }).run()
+      } catch {
+        setUploadError(`Could not read ${file.name}.`)
+      }
+    }
+    if (fileInputRef.current) fileInputRef.current.value = ""
+  }, [editor])
+
+  const pickImage = useCallback(() => {
+    document.getElementById("note-image-input")?.click()
+  }, [])
+  const pickFile = useCallback(() => {
+    document.getElementById("note-file-input")?.click()
+  }, [])
+
+  const openMathDialog = useCallback((kind: "inline" | "block") => {
+    setMathDialog({ kind, pos: null, latex: "" })
+    setActiveMenu(null)
+  }, [])
+
+  const applyMath = useCallback(() => {
+    if (!editor || !mathDialog) return
+    const latex = mathDialog.latex.trim()
+    const { kind, pos } = mathDialog
+    if (!latex) {
+      if (pos !== null) {
+        if (kind === "inline") editor.chain().focus().deleteInlineMath({ pos }).run()
+        else editor.chain().focus().deleteBlockMath({ pos }).run()
+      }
+    } else if (pos === null) {
+      if (kind === "inline") editor.chain().focus().insertInlineMath({ latex }).run()
+      else editor.chain().focus().insertBlockMath({ latex }).run()
+    } else if (kind === "inline") {
+      editor.chain().focus().updateInlineMath({ latex, pos }).run()
+    } else {
+      editor.chain().focus().updateBlockMath({ latex, pos }).run()
+    }
+    setMathDialog(null)
+  }, [editor, mathDialog])
+
+  const linkToDocument = useCallback((doc: { id: string; name: string }) => {
+    if (!editor) return
+    const href = `${NOTE_LINK_PREFIX}${doc.id}`
+    if (editor.state.selection.empty) {
+      editor.chain().focus().insertContent({ type: "text", text: doc.name || "Untitled", marks: [{ type: "link", attrs: { href } }] }).run()
+    } else {
+      editor.chain().focus().setLink({ href }).run()
+    }
+    setDocPickerOpen(false)
   }, [editor])
 
   const openTableDialog = useCallback(() => {
@@ -406,7 +620,8 @@ export function TiptapEditor({
     File: [
       { label: "New document", shortcut: "Ctrl+Alt+N", action: () => onNewDocument?.() },
       { label: "Download as HTML", action: downloadDocument },
-      { label: "Print", shortcut: "Ctrl+P", action: () => window.print() },
+      { label: "Export as Markdown", action: () => onExportMarkdown?.(), disabled: !onExportMarkdown },
+      { label: "Print / save as PDF", shortcut: "Ctrl+P", action: () => window.print() },
     ],
     Edit: [
       { label: "Undo", shortcut: "Ctrl+Z", action: () => editor?.chain().focus().undo().run(), disabled: isReadOnly || !editor?.can().undo() },
@@ -422,7 +637,12 @@ export function TiptapEditor({
     ],
     Insert: [
       { label: "Link", shortcut: "Ctrl+K", action: openLinkDialog, disabled: isReadOnly },
+      { label: "Link to document…", action: () => setDocPickerOpen(true), disabled: isReadOnly || documents.length === 0 },
       { label: "Image from URL", action: addImage, disabled: isReadOnly },
+      { label: "Upload image…", action: pickImage, disabled: isReadOnly },
+      { label: "Attach file / PDF…", action: pickFile, disabled: isReadOnly },
+      { label: "Inline math", action: () => openMathDialog("inline"), disabled: isReadOnly },
+      { label: "Math block", action: () => openMathDialog("block"), disabled: isReadOnly },
       { label: "Insert table…", action: openTableDialog, disabled: isReadOnly },
       { label: "Checklist", action: () => editor?.chain().focus().toggleTaskList().run(), disabled: isReadOnly },
       { label: "Horizontal line", action: () => editor?.chain().focus().setHorizontalRule().run(), disabled: isReadOnly },
@@ -439,9 +659,6 @@ export function TiptapEditor({
     Tools: [
       { label: "Word count", action: () => { setDialog("word-count"); setActiveMenu(null) } },
       { label: spellcheckEnabled ? "Turn off spellcheck" : "Turn on spellcheck", action: toggleSpellcheck },
-    ],
-    Extensions: [
-      { label: "Manage extensions", action: () => { setDialog("extensions"); setActiveMenu(null) } },
     ],
     Help: [
       { label: "Keyboard shortcuts", action: () => { setDialog("help"); setActiveMenu(null) } },
@@ -673,6 +890,20 @@ export function TiptapEditor({
           <MenuButton onClick={() => editor.chain().focus().toggleTaskList().run()} isActive={editor.isActive("taskList")} disabled={isReadOnly} title="Checklist">
             <CheckSquare className="size-4" />
           </MenuButton>
+          <MenuButton
+            onClick={() => (editor.isActive("taskItem") ? editor.chain().focus().sinkListItem("taskItem") : editor.chain().focus().sinkListItem("listItem")).run()}
+            disabled={isReadOnly || !(editor.can().sinkListItem("listItem") || editor.can().sinkListItem("taskItem"))}
+            title="Indent list item (Tab)"
+          >
+            <IndentIncrease className="size-4" />
+          </MenuButton>
+          <MenuButton
+            onClick={() => (editor.isActive("taskItem") ? editor.chain().focus().liftListItem("taskItem") : editor.chain().focus().liftListItem("listItem")).run()}
+            disabled={isReadOnly || !(editor.can().liftListItem("listItem") || editor.can().liftListItem("taskItem"))}
+            title="Outdent list item (Shift+Tab)"
+          >
+            <IndentDecrease className="size-4" />
+          </MenuButton>
         </div>
         <div className="flex items-center gap-0.5 border-l border-border pl-1">
           <MenuButton onClick={() => editor.chain().focus().setTextAlign("left").run()} isActive={editor.isActive({ textAlign: "left" })} disabled={isReadOnly} title="Align left">
@@ -692,8 +923,17 @@ export function TiptapEditor({
           <MenuButton onClick={openLinkDialog} isActive={editor.isActive("link")} disabled={isReadOnly} title="Insert or edit link (Ctrl+K)">
             <LinkIcon className="size-4" />
           </MenuButton>
-          <MenuButton onClick={addImage} disabled={isReadOnly} title="Insert image from URL">
+          <MenuButton onClick={() => setDocPickerOpen(true)} disabled={isReadOnly || documents.length === 0} title="Link to another document">
+            <FileText className="size-4" />
+          </MenuButton>
+          <MenuButton onClick={pickImage} disabled={isReadOnly} title="Upload image">
             <ImageIcon className="size-4" />
+          </MenuButton>
+          <MenuButton onClick={pickFile} disabled={isReadOnly} title="Attach file or PDF">
+            <FileUp className="size-4" />
+          </MenuButton>
+          <MenuButton onClick={() => openMathDialog("inline")} disabled={isReadOnly} title="Insert math (LaTeX)">
+            <Sigma className="size-4" />
           </MenuButton>
           <MenuButton onClick={openTableDialog} disabled={isReadOnly} title="Insert table">
             <TableIcon className="size-4" />
@@ -783,20 +1023,73 @@ export function TiptapEditor({
       </div>
 
       <div className="note-editor-scroll min-h-0 flex-1 overflow-auto p-5">
-        <div className="mx-auto mb-2 flex w-full max-w-[816px] justify-between px-3 text-[10px] text-muted-foreground" aria-hidden="true">
-          {Array.from({ length: 19 }, (_, index) => <span key={index}>{index + 1}</span>)}
-        </div>
+        {uploadError && (
+          <div role="alert" className="mx-auto mb-3 flex max-w-[816px] items-start justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+            {uploadError}
+            <button type="button" aria-label="Dismiss" onClick={() => setUploadError(null)}><X className="size-4" /></button>
+          </div>
+        )}
+        <input id="note-image-input" ref={imageInputRef} type="file" accept="image/*" multiple hidden aria-label="Upload image" onChange={(event) => void uploadImages(event.target.files)} />
+        <input id="note-file-input" ref={fileInputRef} type="file" multiple hidden aria-label="Attach file" onChange={(event) => void uploadAttachments(event.target.files)} />
         <div style={{ zoom: `${zoom}%` }}>
           <EditorContent editor={editor} />
         </div>
       </div>
+
+      <DocumentPicker
+        open={docPickerOpen}
+        title="Link to document"
+        docs={documents.filter((entry) => entry.node.id !== currentDocumentId)}
+        recentIds={recentIds}
+        onSelect={linkToDocument}
+        onClose={() => setDocPickerOpen(false)}
+      />
+      {mathDialog && (() => {
+        const preview = renderLatex(mathDialog.latex, mathDialog.kind === "block")
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onMouseDown={(event) => event.target === event.currentTarget && setMathDialog(null)}>
+            <div role="dialog" aria-modal="true" aria-label="Edit math" className="w-full max-w-lg rounded-xl border border-border bg-card p-5 shadow-xl">
+              <h2 className="mb-3 text-lg font-semibold">{mathDialog.pos === null ? "Insert" : "Edit"} {mathDialog.kind === "block" ? "math block" : "inline math"}</h2>
+              <div className="mb-3 flex gap-2 text-sm">
+                {(["inline", "block"] as const).map((kind) => (
+                  <label key={kind} className="flex items-center gap-1">
+                    <input type="radio" name="math-kind" disabled={mathDialog.pos !== null} checked={mathDialog.kind === kind} onChange={() => setMathDialog({ ...mathDialog, kind })} />
+                    {kind === "inline" ? "Inline" : "Block"}
+                  </label>
+                ))}
+              </div>
+              <textarea
+                autoFocus
+                value={mathDialog.latex}
+                onChange={(event) => setMathDialog({ ...mathDialog, latex: event.target.value })}
+                onKeyDown={(event) => (event.ctrlKey || event.metaKey) && event.key === "Enter" && applyMath()}
+                rows={3}
+                spellCheck={false}
+                aria-label="LaTeX"
+                placeholder="e.g. \frac{a}{b} + \sqrt{x^2+1}"
+                className="w-full rounded-md border border-border bg-background p-2 font-mono text-sm"
+              />
+              <div className="mt-3 min-h-14 overflow-x-auto rounded-md bg-muted p-3 text-center" aria-label="Preview">
+                {preview.error ? <p className="text-left text-xs text-destructive">{preview.error}</p> : <span dangerouslySetInnerHTML={{ __html: preview.html }} />}
+              </div>
+              <div className="mt-4 flex justify-between gap-2">
+                <p className="text-xs text-muted-foreground">Ctrl+Enter to apply. Clear the text to delete an existing formula.</p>
+                <div className="flex gap-2">
+                  <Button variant="outline" onClick={() => setMathDialog(null)}>Cancel</Button>
+                  <Button onClick={applyMath} disabled={Boolean(preview.error)}>Apply</Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {dialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}>
           <div role="dialog" aria-modal="true" className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-xl">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold">
-                {dialog === "link" ? "Insert link" : dialog === "find" ? "Find in document" : dialog === "word-count" ? "Word count" : dialog === "help" ? "Keyboard shortcuts" : "Extensions"}
+                {dialog === "link" ? "Insert link" : dialog === "find" ? "Find in document" : dialog === "word-count" ? "Word count" : "Keyboard shortcuts"}
               </h2>
               <Button variant="ghost" size="icon-sm" aria-label="Close dialog" onClick={() => setDialog(null)}>
                 <X className="size-4" />
@@ -849,18 +1142,14 @@ export function TiptapEditor({
                 <div className="rounded-lg bg-muted p-3"><strong className="block text-xl">{editor.getText().replace(/\s/g, "").length}</strong><span className="text-muted-foreground">Characters without spaces</span></div>
                 <div className="rounded-lg bg-muted p-3"><strong className="block text-xl">{editor.state.doc.childCount}</strong><span className="text-muted-foreground">Paragraphs and blocks</span></div>
               </div>
-            ) : dialog === "help" ? (
-              <div className="space-y-2 text-sm">
-                <p><kbd>Ctrl/⌘ + B</kbd> Bold</p>
-                <p><kbd>Ctrl/⌘ + I</kbd> Italic</p>
-                <p><kbd>Ctrl/⌘ + U</kbd> Underline</p>
-                <p><kbd>Ctrl/⌘ + K</kbd> Insert link</p>
-                <p><kbd>Ctrl/⌘ + Z</kbd> Undo · <kbd>Ctrl/⌘ + Shift + Z</kbd> Redo</p>
-              </div>
             ) : (
-              <div className="space-y-3 text-sm text-muted-foreground">
-                <p>No third-party extensions are connected. The editor includes built-in formatting, tables, links, images, and checklists.</p>
-                <p>Documents are stored locally in this browser.</p>
+              <div className="space-y-2 text-sm">
+                <p><kbd>Ctrl/⌘ + B</kbd> Bold · <kbd>Ctrl/⌘ + I</kbd> Italic · <kbd>Ctrl/⌘ + U</kbd> Underline</p>
+                <p><kbd>Ctrl/⌘ + K</kbd> Insert link · <kbd>Ctrl/⌘ + F</kbd> Find</p>
+                <p><kbd>Ctrl/⌘ + Z</kbd> Undo · <kbd>Ctrl/⌘ + Shift + Z</kbd> Redo</p>
+                <p><kbd>Tab</kbd> / <kbd>Shift + Tab</kbd> Indent / outdent list item</p>
+                <p><kbd>$$…$$</kbd> inline math · <kbd>$$$…$$$</kbd> math block (or Insert → Math)</p>
+                <p><kbd>Alt + O</kbd> Quick switcher · <kbd>Esc</kbd> Exit focus mode</p>
               </div>
             )}
           </div>

@@ -97,6 +97,9 @@ export interface FileNode {
   createdAt: string
   updatedAt: string
   isExpanded?: boolean // UI state for folders
+  isFavourite?: boolean // Documents only
+  lastAccessedAt?: string // Documents only
+  tags?: string[] // Documents only
 }
 
 export interface DashboardData {

@@ -1,25 +1,53 @@
 "use client"
 
-import { useState, useCallback, useMemo, useEffect } from "react"
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react"
 import {
-  Plus,
-  Search,
-  Folder,
+  AlertTriangle,
+  Check,
+  Download,
   FileText,
-  X,
-  ChevronLeft,
-  ChevronRight,
-  Save,
+  Loader2,
   Maximize2,
   Minimize2,
+  PanelLeft,
+  PanelRight,
+  Plus,
+  Search,
+  Star,
+  Trash2,
+  Upload,
+  X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { loadUserData, saveUserData } from "@/lib/user-data"
+import { loadUserData } from "@/lib/user-data"
 import { cn } from "@/lib/utils"
-import { FileTree } from "./file-tree"
+import type { DashboardData, FileNode } from "@/lib/types"
+import { extractOutline, markdownToContent, toMarkdown } from "@/lib/notes/content"
+import {
+  NOTES_STORAGE_KEY,
+  allTags,
+  buildLinkIndex,
+  collectIds,
+  createFileNode,
+  duplicateNode,
+  findNode,
+  flattenDocuments,
+  insertNode,
+  isFileNode,
+  moveNode,
+  normaliseTag,
+  relatedDocumentIds,
+  removeNode,
+  searchDocuments,
+  updateNode,
+  type DocumentEntry,
+} from "@/lib/notes/tree"
+import { DetailsPanel } from "./details-panel"
+import { ConfirmDialog, DocumentPicker, MoveDialog, NameDialog } from "./notes-dialogs"
+import { NotesSidebar } from "./notes-sidebar"
 import { TiptapEditor } from "./tiptap-editor"
-import type { FileNode, DashboardData } from "@/lib/types"
+import { useNotesAutosave } from "./use-notes-autosave"
+import type { FileTreeActions } from "./file-tree"
 
 const emptyDashboard: DashboardData = {
   user: { name: "", role: "" },
@@ -32,142 +60,52 @@ const emptyDashboard: DashboardData = {
   files: [],
 }
 
-const NOTES_STORAGE_KEY = "productivity-hub-notes-files-v1"
-
-function generateId(): string {
-  return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
-}
-
-function createFileNode(name: string, type: "folder" | "document", parentId: string | null): FileNode {
-  const now = new Date().toISOString()
-  return {
-    id: generateId(),
-    name,
-    type,
-    parentId,
-    children: type === "folder" ? [] : undefined,
-    content: type === "document" ? JSON.stringify({
-      type: "doc",
-      content: [{ type: "paragraph", content: [] }],
-    }) : undefined,
-    createdAt: now,
-    updatedAt: now,
-    isExpanded: true,
-  }
-}
-
-function findNode(nodes: FileNode[], id: string): FileNode | null {
-  for (const node of nodes) {
-    if (node.id === id) return node
-    if (node.children) {
-      const found = findNode(node.children, id)
-      if (found) return found
-    }
-  }
-  return null
-}
-
-function updateNode(nodes: FileNode[], id: string, updates: Partial<FileNode>): FileNode[] {
-  return nodes.map((node) => {
-    if (node.id === id) {
-      return { ...node, ...updates, updatedAt: new Date().toISOString() }
-    }
-    if (node.children) {
-      return { ...node, children: updateNode(node.children, id, updates) }
-    }
-    return node
-  })
-}
-
-function removeNode(nodes: FileNode[], id: string): FileNode[] {
-  return nodes
-    .filter((node) => node.id !== id)
-    .map((node) => ({
-      ...node,
-      children: node.children ? removeNode(node.children, id) : undefined,
-    }))
-}
-
-function addNodeToParent(nodes: FileNode[], parentId: string | null, newNode: FileNode): FileNode[] {
-  if (parentId === null) {
-    return [...nodes, newNode]
-  }
-  return nodes.map((node) => {
-    if (node.id === parentId && node.children) {
-      return { ...node, children: [...node.children, newNode], updatedAt: new Date().toISOString() }
-    }
-    if (node.children) {
-      return { ...node, children: addNodeToParent(node.children, parentId, newNode) }
-    }
-    return node
-  })
-}
-
-function getNodeText(node: FileNode): string {
-  if (!node.content) return ""
-  try {
-    const parsed: unknown = JSON.parse(node.content)
-    const collectText = (value: unknown): string => {
-      if (!value || typeof value !== "object") return ""
-      if (Array.isArray(value)) return value.map(collectText).join(" ")
-      const record = value as Record<string, unknown>
-      return `${typeof record.text === "string" ? record.text : ""} ${collectText(record.content)}`
-    }
-    return collectText(parsed)
-  } catch {
-    return node.content
-  }
-}
-
-function filterFileTree(nodes: FileNode[], query: string): FileNode[] {
-  if (!query) return nodes
-  const normalizedQuery = query.toLocaleLowerCase()
-  return nodes.flatMap((node) => {
-    const children = node.children ? filterFileTree(node.children, query) : undefined
-    const matches =
-      node.name.toLocaleLowerCase().includes(normalizedQuery) ||
-      getNodeText(node).toLocaleLowerCase().includes(normalizedQuery)
-    if (!matches && !children?.length) return []
-    return [{ ...node, children }]
-  })
-}
-
-function collectNodeIds(node: FileNode): string[] {
-  return [node.id, ...(node.children?.flatMap(collectNodeIds) ?? [])]
-}
+type NameRequest = { kind: "document" | "folder"; parentId: string | null }
 
 function findFirstDocument(nodes: FileNode[]): FileNode | null {
   for (const node of nodes) {
     if (node.type === "document") return node
-    const childDocument = node.children ? findFirstDocument(node.children) : null
-    if (childDocument) return childDocument
+    const child = node.children ? findFirstDocument(node.children) : null
+    if (child) return child
   }
   return null
 }
 
-function isFileNode(value: unknown): value is FileNode {
-  if (!value || typeof value !== "object") return false
-  const node = value as Record<string, unknown>
-  const validShape =
-    typeof node.id === "string" &&
-    typeof node.name === "string" &&
-    (node.type === "folder" || node.type === "document") &&
-    (typeof node.parentId === "string" || node.parentId === null) &&
-    typeof node.createdAt === "string" &&
-    typeof node.updatedAt === "string" &&
-    (node.content === undefined || typeof node.content === "string") &&
-    (node.children === undefined ||
-      (Array.isArray(node.children) && node.children.every(isFileNode)))
-  if (!validShape) return false
-  if (node.type === "document" && typeof node.content === "string") {
-    try {
-      const content: unknown = JSON.parse(node.content)
-      return Boolean(content && typeof content === "object" && (content as Record<string, unknown>).type === "doc")
-    } catch {
-      return false
-    }
+function downloadText(filename: string, text: string, mime: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: `${mime};charset=utf-8` }))
+  const link = document.createElement("a")
+  link.href = url
+  link.download = filename
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+const safeFilename = (name: string) => (name.trim() || "document").replace(/[\\/:*?"<>|]+/g, "-")
+
+function SaveIndicator({ status, error, onRetry }: { status: ReturnType<typeof useNotesAutosave>["status"]; error: string | null; onRetry: () => void }) {
+  if (status === "error") {
+    return (
+      <button
+        type="button"
+        onClick={onRetry}
+        title={`${error ?? "Could not save"} — click to retry`}
+        className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-destructive hover:bg-destructive/10"
+      >
+        <AlertTriangle className="size-3.5" /> Save failed · Retry
+      </button>
+    )
   }
-  return true
+  return (
+    <span role="status" aria-live="polite" className="flex items-center gap-1.5 px-2 text-xs text-muted-foreground">
+      {status === "saving" ? (
+        <><Loader2 className="size-3.5 animate-spin" /> Saving…</>
+      ) : status === "dirty" ? (
+        <><span className="size-1.5 rounded-full bg-amber-500" /> Unsaved changes</>
+      ) : (
+        <><Check className="size-3.5 text-emerald-600" /> Saved</>
+      )}
+    </span>
+  )
 }
 
 export function NotesView({
@@ -178,372 +116,487 @@ export function NotesView({
   onUpdateDashboard?: (data: Partial<DashboardData>) => void
 }) {
   const [files, setFiles] = useState<FileNode[]>(initialData.files || [])
-  const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
-  const [openDocumentIds, setOpenDocumentIds] = useState<string[]>([])
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [openIds, setOpenIds] = useState<string[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [panelOpen, setPanelOpen] = useState(false)
   const [focusMode, setFocusMode] = useState(false)
-  const [showNewFileDialog, setShowNewFileDialog] = useState(false)
-  const [newFileName, setNewFileName] = useState("")
-  const [newFileType, setNewFileType] = useState<"folder" | "document">("document")
-  const [newFileParentId, setNewFileParentId] = useState<string | null>(null)
-  const [searchValue, setSearchValue] = useState("")
-  const [storageReady, setStorageReady] = useState(false)
-  const [storageLoadFailed, setStorageLoadFailed] = useState(false)
-  const [storageError, setStorageError] = useState<string | null>(null)
+  const [query, setQuery] = useState("")
+  const [ready, setReady] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [loadAttempt, setLoadAttempt] = useState(0)
+  const [nameRequest, setNameRequest] = useState<NameRequest | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<FileNode | null>(null)
+  const [moveTarget, setMoveTarget] = useState<FileNode | null>(null)
+  const [switcherOpen, setSwitcherOpen] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+  const importRef = useRef<HTMLInputElement>(null)
+  const filesRef = useRef(files)
 
   useEffect(() => {
-    const query = window.matchMedia("(min-width: 1280px)")
-    const updateSidebar = () => setSidebarOpen(query.matches)
-    updateSidebar()
-    query.addEventListener("change", updateSidebar)
-    return () => query.removeEventListener("change", updateSidebar)
-  }, [])
+    filesRef.current = files
+  }, [files])
 
-  const selectedFile = useMemo(() => findNode(files, selectedFileId || ""), [files, selectedFileId])
-  const visibleFiles = useMemo(() => filterFileTree(files, searchValue.trim()), [files, searchValue])
+  const autosave = useNotesAutosave(files, ready && !loadError)
+
+  useEffect(() => {
+    if (ready && !loadError) onUpdateDashboard?.({ files })
+  }, [files, loadError, onUpdateDashboard, ready])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setSidebarOpen(window.matchMedia("(min-width: 1024px)").matches)
+      setPanelOpen(window.matchMedia("(min-width: 1280px)").matches)
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [])
 
   useEffect(() => {
     let active = true
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        try {
-          const parsed = await loadUserData<unknown>(NOTES_STORAGE_KEY)
-          let loadedFiles = initialData.files || []
-          if (parsed !== null) {
+    void (async () => {
+      try {
+        const parsed = await loadUserData<unknown>(NOTES_STORAGE_KEY)
+        let loaded = initialData.files || []
+        if (parsed !== null) {
           if (!Array.isArray(parsed) || !parsed.every(isFileNode)) {
             throw new Error("Saved notes data is not a valid file list.")
           }
-            loadedFiles = parsed
-          }
-          if (active) {
-            setFiles(loadedFiles)
-            const firstDocument = findFirstDocument(loadedFiles)
-            if (firstDocument) {
-              setSelectedFileId(firstDocument.id)
-              setOpenDocumentIds([firstDocument.id])
-            }
-          }
-        } catch (error) {
-          if (active) {
-            setStorageLoadFailed(true)
-            setStorageError(error instanceof Error ? error.message : "Could not load saved notes.")
-          }
-        } finally {
-          if (active) setStorageReady(true)
+          loaded = parsed
         }
-      })()
-    }, 0)
+        if (!active) return
+        setFiles(loaded)
+        filesRef.current = loaded
+        const recent = flattenDocuments(loaded)
+          .map(({ node }) => node)
+          .sort((a, b) => (b.lastAccessedAt ?? b.updatedAt).localeCompare(a.lastAccessedAt ?? a.updatedAt))[0]
+        const first = recent ?? findFirstDocument(loaded)
+        if (first) {
+          setSelectedId(first.id)
+          setOpenIds([first.id])
+        }
+        setLoadError(null)
+      } catch (error) {
+        if (active) setLoadError(error instanceof Error ? error.message : "Could not load saved notes.")
+      } finally {
+        if (active) setReady(true)
+      }
+    })()
     return () => {
       active = false
-      window.clearTimeout(timer)
     }
-  }, [initialData.files])
+  }, [initialData.files, loadAttempt])
 
   useEffect(() => {
-    if (!focusMode) return
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setFocusMode(false)
-    }
-    window.addEventListener("keydown", handleEscape)
-    return () => window.removeEventListener("keydown", handleEscape)
-  }, [focusMode])
-
-  useEffect(() => {
-    if (!storageReady || storageLoadFailed) return
-    const timer = window.setTimeout(() => {
-      onUpdateDashboard?.({ files })
-      void saveUserData(NOTES_STORAGE_KEY, files)
-        .then(() => setStorageError(null))
-        .catch((error: unknown) => setStorageError(error instanceof Error ? error.message : "Could not save notes."))
-    }, 150)
+    if (!notice) return
+    const timer = window.setTimeout(() => setNotice(null), 4000)
     return () => window.clearTimeout(timer)
-  }, [files, onUpdateDashboard, storageLoadFailed, storageReady])
+  }, [notice])
 
-  const handleSelectFile = useCallback((file: FileNode) => {
-    if (file.type === "document") {
-      setSelectedFileId(file.id)
-      setOpenDocumentIds((current) =>
-        current.includes(file.id) ? current : [...current, file.id]
-      )
-    } else {
-      // For folders, toggle expansion
-      setFiles((current) => updateNode(current, file.id, { isExpanded: !file.isExpanded }))
+  const docs = useMemo(() => flattenDocuments(files), [files])
+  const docsById = useMemo(() => new Map(docs.map((entry) => [entry.node.id, entry])), [docs])
+  const titles = useMemo(() => new Map(docs.map(({ node }) => [node.id, node.name])), [docs])
+  const deferredQuery = useDeferredValue(query)
+  const results = useMemo(() => searchDocuments(docs, deferredQuery, titles), [docs, deferredQuery, titles])
+  const tags = useMemo(() => allTags(docs), [docs])
+  const selected = selectedId ? findNode(files, selectedId) : null
+  const selectedDoc = selected?.type === "document" ? selected : null
+
+  const recents = useMemo(
+    () =>
+      docs
+        .filter(({ node }) => node.lastAccessedAt)
+        .sort((a, b) => (b.node.lastAccessedAt ?? "").localeCompare(a.node.lastAccessedAt ?? ""))
+        .slice(0, 6),
+    [docs]
+  )
+  const favourites = useMemo(() => docs.filter(({ node }) => node.isFavourite), [docs])
+  const recentIds = useMemo(() => recents.map(({ node }) => node.id), [recents])
+
+  const linkIndex = useMemo(() => (panelOpen ? buildLinkIndex(docs) : null), [docs, panelOpen])
+  const toEntries = useCallback(
+    (ids: string[]) => ids.map((id) => docsById.get(id)).filter((entry): entry is DocumentEntry => Boolean(entry)),
+    [docsById]
+  )
+
+  const outline = useMemo(() => (panelOpen ? extractOutline(selectedDoc?.content) : []), [panelOpen, selectedDoc?.content])
+
+  const openDocument = useCallback((node: FileNode) => {
+    if (node.type !== "document") return
+    setSelectedId(node.id)
+    setOpenIds((current) => (current.includes(node.id) ? current : [...current, node.id]))
+    setFiles((current) => updateNode(current, node.id, { lastAccessedAt: new Date().toISOString() }, false))
+    if (typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches) setSidebarOpen(false)
+  }, [])
+
+  const openById = useCallback(
+    (id: string) => {
+      const node = findNode(filesRef.current, id)
+      if (node) openDocument(node)
+      else setNotice("That document no longer exists.")
+    },
+    [openDocument]
+  )
+
+  const requestCreate = useCallback((kind: "document" | "folder", parentId: string | null) => {
+    setNameRequest({ kind, parentId })
+  }, [])
+
+  const submitName = useCallback(
+    (name: string) => {
+      if (!nameRequest) return
+      const node = createFileNode(name, nameRequest.kind, nameRequest.parentId)
+      setFiles((current) => insertNode(current, nameRequest.parentId, node))
+      setNameRequest(null)
+      if (node.type === "document") {
+        setSelectedId(node.id)
+        setOpenIds((current) => [...current, node.id])
+      }
+    },
+    [nameRequest]
+  )
+
+  const exportMarkdown = useCallback(
+    (node: FileNode) => {
+      const markdown = toMarkdown(node.name, node.content, (id) => titles.get(id))
+      downloadText(`${safeFilename(node.name)}.md`, markdown, "text/markdown")
+    },
+    [titles]
+  )
+
+  const handleImport = useCallback(async (fileList: FileList | null) => {
+    const imported: FileNode[] = []
+    for (const file of Array.from(fileList ?? [])) {
+      const { title, content } = markdownToContent(await file.text())
+      const node = createFileNode(title || file.name.replace(/\.(md|markdown|txt)$/i, ""), "document", null)
+      imported.push({ ...node, content })
     }
+    if (importRef.current) importRef.current.value = ""
+    if (imported.length === 0) return
+    setFiles((current) => imported.reduce((acc, node) => insertNode(acc, null, node), current))
+    setSelectedId(imported[0].id)
+    setOpenIds((current) => [...current, ...imported.map((node) => node.id)])
+    setNotice(`Imported ${imported.length} document${imported.length === 1 ? "" : "s"}.`)
   }, [])
 
-  const handleCreateFile = useCallback((parentId: string | null) => {
-    setNewFileParentId(parentId)
-    setNewFileType("document")
-    setNewFileName("Untitled document")
-    setShowNewFileDialog(true)
-  }, [])
+  const closeTab = useCallback(
+    (id: string) => {
+      const index = openIds.indexOf(id)
+      const next = openIds.filter((openId) => openId !== id)
+      setOpenIds(next)
+      if (selectedId === id) setSelectedId(next[Math.max(0, index - 1)] ?? null)
+    },
+    [openIds, selectedId]
+  )
 
-  const handleCreateFolder = useCallback((parentId: string | null) => {
-    setNewFileParentId(parentId)
-    setNewFileType("folder")
-    setNewFileName("New folder")
-    setShowNewFileDialog(true)
-  }, [])
+  const confirmDelete = useCallback(() => {
+    if (!deleteTarget) return
+    const removed = collectIds(deleteTarget)
+    setFiles((current) => removeNode(current, deleteTarget.id))
+    setOpenIds((current) => current.filter((id) => !removed.includes(id)))
+    setSelectedId((current) => (current && removed.includes(current) ? null : current))
+    setDeleteTarget(null)
+  }, [deleteTarget])
 
-  const handleConfirmCreate = useCallback(() => {
-    if (!newFileName.trim()) return
-    const newNode = createFileNode(newFileName.trim(), newFileType, newFileParentId)
-    setFiles((current) => addNodeToParent(current, newFileParentId, newNode))
-    if (newFileType === "document") {
-      setSelectedFileId(newNode.id)
-      setOpenDocumentIds((current) => [...current, newNode.id])
+  const actions = useMemo<FileTreeActions>(
+    () => ({
+      onOpen: openDocument,
+      onToggleFolder: (node) =>
+        setFiles((current) => updateNode(current, node.id, { isExpanded: !(node.isExpanded ?? true) }, false)),
+      onCreateFile: (parentId) => requestCreate("document", parentId),
+      onCreateFolder: (parentId) => requestCreate("folder", parentId),
+      onRename: (node, name) => setFiles((current) => updateNode(current, node.id, { name })),
+      onDuplicate: (node) => {
+        const result = duplicateNode(filesRef.current, node.id)
+        if (!result) return
+        setFiles(result.nodes)
+        if (result.copy.type === "document") openDocument(result.copy)
+      },
+      onToggleFavourite: (node) =>
+        setFiles((current) => updateNode(current, node.id, { isFavourite: !node.isFavourite }, false)),
+      onMove: setMoveTarget,
+      onExport: exportMarkdown,
+      onDelete: setDeleteTarget,
+      onDrop: (dragId, targetParentId, beforeId) => {
+        const moved = moveNode(filesRef.current, dragId, targetParentId, beforeId)
+        if (moved) setFiles(moved)
+        else setNotice("That item can't be moved there.")
+      },
+    }),
+    [exportMarkdown, openDocument, requestCreate]
+  )
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && focusMode) setFocusMode(false)
+      if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "o") {
+        event.preventDefault()
+        setSwitcherOpen(true)
+      }
+      if (event.altKey && event.ctrlKey && event.key.toLowerCase() === "n") {
+        event.preventDefault()
+        requestCreate("document", null)
+      }
     }
-    setShowNewFileDialog(false)
-    setNewFileName("")
-  }, [newFileName, newFileType, newFileParentId])
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [focusMode, requestCreate])
 
-  const handleRenameFile = useCallback((file: FileNode) => {
-    setFiles((current) => updateNode(current, file.id, { name: file.name }))
+  const jumpToHeading = useCallback((index: number) => {
+    const headings = document.querySelectorAll<HTMLElement>(".note-editor-scroll .ProseMirror h1, .note-editor-scroll .ProseMirror h2, .note-editor-scroll .ProseMirror h3")
+    headings[index]?.scrollIntoView({ behavior: "smooth", block: "start" })
   }, [])
 
-  const handleDeleteFile = useCallback((file: FileNode) => {
-    const removedIds = collectNodeIds(file)
-    setFiles((current) => removeNode(current, file.id))
-    setOpenDocumentIds((current) => current.filter((id) => !removedIds.includes(id)))
-    if (selectedFileId && removedIds.includes(selectedFileId)) setSelectedFileId(null)
-  }, [selectedFileId])
+  const updateTags = (tagsNext: string[]) => {
+    if (selectedDoc) setFiles((current) => updateNode(current, selectedDoc.id, { tags: tagsNext }))
+  }
 
-  const handleContentChange = useCallback((content: string) => {
-    if (!selectedFile) return
-    setFiles((current) => updateNode(current, selectedFile.id, { content }))
-  }, [selectedFile])
+  const showSidebar = sidebarOpen && !focusMode
+  const showPanel = panelOpen && !focusMode && selectedDoc
+  const currentEntry = selectedDoc ? docsById.get(selectedDoc.id) : undefined
 
-  const handleCloseTab = useCallback((fileId: string) => {
-    const tabIndex = openDocumentIds.indexOf(fileId)
-    const nextTabs = openDocumentIds.filter((id) => id !== fileId)
-    setOpenDocumentIds(nextTabs)
-    if (selectedFileId === fileId) {
-      setSelectedFileId(nextTabs[Math.max(0, tabIndex - 1)] ?? null)
-    }
-  }, [openDocumentIds, selectedFileId])
+  if (!ready) {
+    return (
+      <div className="flex h-[calc(100dvh-180px)] min-h-[480px] items-center justify-center rounded-xl border border-border bg-background text-sm text-muted-foreground">
+        <Loader2 className="mr-2 size-4 animate-spin" /> Loading notes…
+      </div>
+    )
+  }
 
-  const handleOpenTab = useCallback((fileId: string) => {
-    setSelectedFileId(fileId)
-  }, [])
+  if (loadError) {
+    return (
+      <div role="alert" className="flex h-[calc(100dvh-180px)] min-h-[480px] flex-col items-center justify-center gap-3 rounded-xl border border-destructive/30 bg-background p-6 text-center">
+        <AlertTriangle className="size-8 text-destructive" />
+        <div>
+          <h2 className="font-semibold">Your notes could not be loaded</h2>
+          <p className="mt-1 max-w-md text-sm text-muted-foreground">{loadError} Editing is disabled so saved notes aren&apos;t overwritten.</p>
+        </div>
+        <Button onClick={() => { setReady(false); setLoadAttempt((n) => n + 1) }}>Try again</Button>
+      </div>
+    )
+  }
 
   return (
-    <div className={cn(
-      "flex h-[calc(100dvh-180px)] min-h-[480px] flex-col overflow-hidden rounded-xl border border-border bg-background",
-      focusMode && "fixed inset-0 z-[60] h-dvh w-screen max-w-none rounded-none border-0"
-    )}>
-      {/* Top Bar */}
-      <div className="flex items-center justify-between border-b border-border px-4 py-3 bg-card">
-        <div className="flex items-center gap-3">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-            aria-label={sidebarOpen ? "Hide file browser" : "Show file browser"}
-            title={sidebarOpen ? "Hide file browser" : "Show file browser"}
-          >
-            {sidebarOpen ? <ChevronLeft className="size-4" /> : <ChevronRight className="size-4" />}
-          </Button>
-          <h1 className="text-xl font-semibold">{focusMode ? selectedFile?.name ?? "Notes" : "Notes"}</h1>
+    <div
+      className={cn(
+        "relative flex h-[calc(100dvh-180px)] min-h-[480px] flex-col overflow-hidden rounded-xl border border-border bg-background",
+        focusMode && "fixed inset-0 z-[60] h-dvh w-screen max-w-none rounded-none border-0"
+      )}
+    >
+      <header className="flex items-center justify-between gap-2 border-b border-border bg-card px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          {!focusMode && (
+            <Button variant="ghost" size="icon-sm" onClick={() => setSidebarOpen((open) => !open)} aria-label={sidebarOpen ? "Hide file browser" : "Show file browser"} title={sidebarOpen ? "Hide file browser" : "Show file browser"} aria-pressed={sidebarOpen}>
+              <PanelLeft className="size-4" />
+            </Button>
+          )}
+          <h1 className="truncate text-base font-semibold">{focusMode ? selectedDoc?.name ?? "Notes" : "Notes"}</h1>
         </div>
-
-        <div className="flex items-center gap-2">
-          <div className="relative hidden sm:block">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-            <Input
-              placeholder="Search in notes..."
-              className="pl-9 w-64"
-              value={searchValue}
-              onChange={(event) => setSearchValue(event.target.value)}
-              aria-label="Search notes"
-            />
-          </div>
-          <Button variant="outline" size="sm" onClick={() => handleCreateFile(null)}>
-            <Plus className="size-3.5 mr-1.5" />
-            New Document
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label={focusMode ? "Exit focus view" : "Focus view"}
-            title={focusMode ? "Exit focus view" : "Open centered focus view"}
-            onClick={() => setFocusMode((active) => !active)}
-          >
+        <div className="flex items-center gap-1">
+          <SaveIndicator status={autosave.status} error={autosave.error} onRetry={() => void autosave.retry()} />
+          {!focusMode && (
+            <>
+              <Button variant="ghost" size="sm" onClick={() => setSwitcherOpen(true)} title="Quick switcher (Alt+O)" aria-label="Open quick switcher">
+                <Search className="size-4" /> <span className="hidden md:inline">Quick find</span>
+                <kbd className="hidden rounded border border-border px-1 text-[10px] text-muted-foreground md:inline">Alt+O</kbd>
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => importRef.current?.click()} title="Import Markdown files">
+                <Upload className="size-4" /> <span className="hidden md:inline">Import</span>
+              </Button>
+              <input
+                ref={importRef}
+                type="file"
+                multiple
+                accept=".md,.markdown,.txt,text/markdown,text/plain"
+                className="hidden"
+                aria-label="Import Markdown files"
+                onChange={(event) => void handleImport(event.target.files)}
+              />
+            </>
+          )}
+          <Button variant="ghost" size="icon-sm" onClick={() => setFocusMode((active) => !active)} aria-label={focusMode ? "Exit focus mode" : "Enter focus mode"} title={focusMode ? "Exit focus mode (Esc)" : "Focus mode"}>
             {focusMode ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
           </Button>
-          <div className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex">
-            <Save className="size-3.5" />
-            {storageError ? "Save failed" : storageReady ? "Saved on this device" : "Loading notes"}
-          </div>
+          {!focusMode && (
+            <Button variant="ghost" size="icon-sm" onClick={() => setPanelOpen((open) => !open)} aria-label={panelOpen ? "Hide details panel" : "Show details panel"} title={panelOpen ? "Hide details panel" : "Show details panel"} aria-pressed={panelOpen}>
+              <PanelRight className="size-4" />
+            </Button>
+          )}
         </div>
-      </div>
-      {storageError && (
-        <div role="status" className="border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-sm text-destructive">
-          {storageError}
+      </header>
+
+      {autosave.status === "error" && (
+        <div role="alert" className="border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-sm text-destructive">
+          Your latest changes haven&apos;t been saved: {autosave.error}. Retrying automatically — keep this page open or use Retry.
+        </div>
+      )}
+      {notice && (
+        <div role="status" className="flex items-center justify-between border-b border-border bg-muted/50 px-4 py-1.5 text-sm">
+          {notice}
+          <button type="button" aria-label="Dismiss" onClick={() => setNotice(null)}><X className="size-3.5" /></button>
         </div>
       )}
 
-      {/* Main Content */}
-      <div className="flex min-w-0 flex-1 overflow-hidden">
-        {/* Sidebar - File Tree */}
-        <aside
-          className={cn(
-            "w-72 flex-shrink-0 border-r border-border bg-card flex flex-col transition-all duration-200",
-            (!sidebarOpen || focusMode) && "w-0 overflow-hidden border-0"
-          )}
-        >
-          <FileTree
-            files={visibleFiles}
-            searchQuery={searchValue.trim()}
-            selectedFileId={selectedFileId}
-            onSelectFile={handleSelectFile}
-            onCreateFile={handleCreateFile}
-            onCreateFolder={handleCreateFolder}
-            onRenameFile={handleRenameFile}
-            onDeleteFile={handleDeleteFile}
-          />
-        </aside>
+      <div className="relative flex min-h-0 min-w-0 flex-1">
+        {showSidebar && (
+          <aside className="z-20 flex w-72 shrink-0 flex-col border-r border-border bg-card max-lg:absolute max-lg:inset-y-0 max-lg:left-0 max-lg:shadow-xl">
+            <NotesSidebar
+              files={files}
+              favourites={favourites}
+              recents={recents}
+              tags={tags}
+              query={query}
+              results={results}
+              selectedId={selectedId}
+              actions={actions}
+              onQueryChange={setQuery}
+            />
+          </aside>
+        )}
 
-        {/* Main Editor Area */}
-        <main className="flex-1 flex flex-col overflow-hidden min-w-0">
-          {selectedFile && selectedFile.type === "document" ? (
+        <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          {selectedDoc ? (
             <>
-              <div role="tablist" aria-label="Open documents" className="flex min-h-10 items-end gap-1 overflow-x-auto border-b border-border bg-muted/30 px-2 pt-1">
-                {openDocumentIds.map((fileId) => {
-                  const file = findNode(files, fileId)
-                  if (!file || file.type !== "document") return null
-                  const active = selectedFileId === fileId
-                  return (
-                    <div
-                      key={file.id}
-                      role="presentation"
-                      className={cn(
-                        "group flex max-w-56 shrink-0 items-center rounded-t-lg border border-b-0 px-2 text-sm",
-                        active ? "border-border bg-card" : "border-transparent text-muted-foreground hover:bg-muted"
-                      )}
-                    >
-                      <button
-                        type="button"
-                        role="tab"
-                        aria-selected={active}
-                        onClick={() => handleOpenTab(file.id)}
-                        className="flex h-9 min-w-0 items-center gap-2"
-                      >
-                        <FileText className="size-3.5 shrink-0" />
-                        <span className="truncate">{file.name}</span>
-                      </button>
-                      <button
-                        type="button"
-                        aria-label={`Close ${file.name}`}
-                        onClick={() => handleCloseTab(file.id)}
-                        className="ml-1 rounded p-1 opacity-60 hover:bg-muted hover:opacity-100"
-                      >
-                        <X className="size-3.5" />
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-              {/* Document Header */}
-              <div className="border-b border-border bg-card px-4 py-2 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <FileText className="size-5 text-muted-foreground" />
-                  <input
-                    type="text"
-                    value={selectedFile.name}
-                    onChange={(e) => handleRenameFile({ ...selectedFile, name: e.target.value })}
-                    className="bg-transparent border-none focus:outline-none text-lg font-semibold flex-1 pr-4"
-                  />
+              {!focusMode && (
+                <div role="tablist" aria-label="Open documents" className="flex min-h-9 items-end gap-1 overflow-x-auto border-b border-border bg-muted/30 px-2 pt-1">
+                  {openIds.map((id) => {
+                    const file = docsById.get(id)?.node
+                    if (!file) return null
+                    const active = selectedId === id
+                    return (
+                      <div key={id} role="presentation" className={cn("group flex max-w-52 shrink-0 items-center rounded-t-lg border border-b-0 px-2 text-sm", active ? "border-border bg-card" : "border-transparent text-muted-foreground hover:bg-muted")}>
+                        <button type="button" role="tab" aria-selected={active} onClick={() => openDocument(file)} className="flex h-8 min-w-0 items-center gap-2">
+                          <FileText className="size-3.5 shrink-0" />
+                          <span className="truncate">{file.name || "Untitled"}</span>
+                        </button>
+                        <button type="button" aria-label={`Close ${file.name}`} onClick={() => closeTab(id)} className="ml-1 rounded p-1 opacity-60 hover:bg-muted hover:opacity-100">
+                          <X className="size-3.5" />
+                        </button>
+                      </div>
+                    )
+                  })}
                 </div>
-                <span className="hidden text-xs text-muted-foreground sm:block">
-                  Edited {new Date(selectedFile.updatedAt).toLocaleString()}
-                </span>
-              </div>
-
-              {/* Editor */}
-              <div className="flex min-w-0 flex-1 overflow-hidden">
-                <TiptapEditor
-                  key={selectedFile.id}
-                  content={selectedFile.content || ""}
-                  onChange={handleContentChange}
-                  placeholder="Start writing your document..."
-                  onNewDocument={() => handleCreateFile(null)}
-                  title={selectedFile.name}
-                  focusMode={focusMode}
-                  onToggleFocus={() => setFocusMode((active) => !active)}
-                />
-              </div>
+              )}
+              {!focusMode && (
+                <div className="flex items-center gap-2 border-b border-border bg-card px-4 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[11px] text-muted-foreground">{currentEntry ? ["Notes", ...currentEntry.path].join(" / ") : "Notes"}</p>
+                    <input
+                      type="text"
+                      aria-label="Document title"
+                      value={selectedDoc.name}
+                      onChange={(event) => actions.onRename(selectedDoc, event.target.value)}
+                      onBlur={(event) => !event.target.value.trim() && actions.onRename(selectedDoc, "Untitled document")}
+                      placeholder="Untitled document"
+                      className="w-full border-none bg-transparent text-xl font-semibold outline-none placeholder:text-muted-foreground/60"
+                    />
+                  </div>
+                  <Button variant="ghost" size="icon-sm" onClick={() => actions.onToggleFavourite(selectedDoc)} aria-pressed={Boolean(selectedDoc.isFavourite)} aria-label={selectedDoc.isFavourite ? "Remove from favourites" : "Add to favourites"} title={selectedDoc.isFavourite ? "Remove from favourites" : "Add to favourites"}>
+                    <Star className={cn("size-4", selectedDoc.isFavourite && "fill-amber-400 text-amber-400")} />
+                  </Button>
+                  <Button variant="ghost" size="icon-sm" onClick={() => exportMarkdown(selectedDoc)} aria-label="Export as Markdown" title="Export as Markdown">
+                    <Download className="size-4" />
+                  </Button>
+                  <Button variant="ghost" size="icon-sm" onClick={() => setDeleteTarget(selectedDoc)} aria-label="Delete document" title="Delete document">
+                    <Trash2 className="size-4" />
+                  </Button>
+                </div>
+              )}
+              <TiptapEditor
+                key={selectedDoc.id}
+                content={selectedDoc.content || ""}
+                onChange={(content) => setFiles((current) => updateNode(current, selectedDoc.id, { content }))}
+                placeholder="Start writing, or type / for formatting…"
+                onNewDocument={() => requestCreate("document", null)}
+                title={selectedDoc.name}
+                focusMode={focusMode}
+                onToggleFocus={() => setFocusMode((active) => !active)}
+                documents={docs}
+                recentIds={recentIds}
+                currentDocumentId={selectedDoc.id}
+                onNavigateToDocument={openById}
+                onExportMarkdown={() => exportMarkdown(selectedDoc)}
+              />
             </>
           ) : (
-            <div className="flex-1 flex items-center justify-center text-muted-foreground">
-              <div className="text-center p-8">
-                <FileText className="size-24 mx-auto mb-4 opacity-20" />
-                <h2 className="text-xl font-medium mb-2">No document selected</h2>
-                <p className="text-sm mb-6">Select a document from the sidebar or create a new one</p>
-                <div className="flex items-center justify-center gap-2">
-                  <Button onClick={() => handleCreateFile(null)}>
-                    <Plus className="size-3.5 mr-1.5" />
-                    New Document
-                  </Button>
-                  <Button variant="outline" onClick={() => handleCreateFolder(null)}>
-                    <Plus className="size-3.5 mr-1.5" />
-                    New Folder
-                  </Button>
+            <div className="flex flex-1 items-center justify-center p-6 text-muted-foreground">
+              <div className="text-center">
+                <FileText className="mx-auto mb-4 size-16 opacity-20" />
+                <h2 className="mb-1 text-lg font-medium text-foreground">{docs.length ? "No document open" : "Create your first note"}</h2>
+                <p className="mb-5 text-sm">{docs.length ? "Pick a document from the sidebar or press Alt+O to jump to one." : "Documents support rich text, tables, maths, images and links between notes."}</p>
+                <div className="flex justify-center gap-2">
+                  <Button onClick={() => requestCreate("document", null)}><Plus /> New document</Button>
+                  <Button variant="outline" onClick={() => requestCreate("folder", null)}>New folder</Button>
                 </div>
               </div>
             </div>
           )}
         </main>
+
+        {showPanel && selectedDoc && (
+          <aside className="z-20 w-72 shrink-0 border-l border-border bg-card max-xl:absolute max-xl:inset-y-0 max-xl:right-0 max-xl:shadow-xl">
+            <DetailsPanel
+              doc={selectedDoc}
+              folderPath={currentEntry ? ["Notes", ...currentEntry.path].join(" / ") : "Notes"}
+              outline={outline}
+              backlinks={toEntries(linkIndex?.backlinks.get(selectedDoc.id) ?? [])}
+              outgoing={toEntries(linkIndex?.outgoing.get(selectedDoc.id) ?? [])}
+              related={toEntries(linkIndex ? relatedDocumentIds(selectedDoc, docs, linkIndex) : [])}
+              tagSuggestions={tags.map((item) => item.tag)}
+              onOpen={openDocument}
+              onJumpToHeading={jumpToHeading}
+              onAddTag={(tag) => {
+                const normalised = normaliseTag(tag)
+                if (normalised && !(selectedDoc.tags ?? []).includes(normalised)) updateTags([...(selectedDoc.tags ?? []), normalised])
+              }}
+              onRemoveTag={(tag) => updateTags((selectedDoc.tags ?? []).filter((item) => item !== tag))}
+            />
+          </aside>
+        )}
       </div>
 
-      {/* Create New File/Folder Dialog */}
-      {showNewFileDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-card rounded-xl border border-border w-full max-w-md p-6">
-            <h3 className="text-lg font-semibold mb-4">
-              {newFileType === "folder" ? "New Folder" : "New Document"}
-            </h3>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium mb-1">Name</label>
-                <Input
-                  value={newFileName}
-                  onChange={(e) => setNewFileName(e.target.value)}
-                  placeholder={newFileType === "folder" ? "Folder name" : "Document title"}
-                  autoFocus
-                  onKeyDown={(e) => e.key === "Enter" && handleConfirmCreate()}
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-1">Type</label>
-                <div className="flex gap-2">
-                  <Button
-                    variant={newFileType === "document" ? "default" : "outline"}
-                    onClick={() => setNewFileType("document")}
-                    className="flex-1"
-                  >
-                    <FileText className="size-4 mr-2" />
-                    Document
-                  </Button>
-                  <Button
-                    variant={newFileType === "folder" ? "default" : "outline"}
-                    onClick={() => setNewFileType("folder")}
-                    className="flex-1"
-                  >
-                    <Folder className="size-4 mr-2" />
-                    Folder
-                  </Button>
-                </div>
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 mt-6">
-              <Button variant="outline" onClick={() => setShowNewFileDialog(false)}>
-                Cancel
-              </Button>
-              <Button onClick={handleConfirmCreate}>Create</Button>
-            </div>
-          </div>
-        </div>
-      )}
+      <NameDialog
+        open={nameRequest !== null}
+        title={nameRequest?.kind === "folder" ? "New folder" : "New document"}
+        initialValue={nameRequest?.kind === "folder" ? "New folder" : "Untitled document"}
+        confirmLabel="Create"
+        onSubmit={submitName}
+        onClose={() => setNameRequest(null)}
+      />
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title={`Delete ${deleteTarget?.type === "folder" ? "folder" : "document"}?`}
+        description={
+          deleteTarget?.type === "folder"
+            ? `“${deleteTarget.name}” and the ${flattenDocuments(deleteTarget.children ?? []).length} document(s) inside it will be permanently deleted.`
+            : `“${deleteTarget?.name ?? ""}” will be permanently deleted. This cannot be undone.`
+        }
+        onConfirm={confirmDelete}
+        onClose={() => setDeleteTarget(null)}
+      />
+      <MoveDialog
+        open={moveTarget !== null}
+        node={moveTarget}
+        tree={files}
+        onMove={(folderId) => {
+          if (moveTarget) {
+            const moved = moveNode(files, moveTarget.id, folderId)
+            if (moved) setFiles(moved)
+          }
+          setMoveTarget(null)
+        }}
+        onClose={() => setMoveTarget(null)}
+      />
+      <DocumentPicker
+        open={switcherOpen}
+        title="Quick switcher"
+        docs={docs}
+        recentIds={recentIds}
+        onSelect={(node) => {
+          setSwitcherOpen(false)
+          openDocument(node)
+        }}
+        onClose={() => setSwitcherOpen(false)}
+      />
     </div>
   )
 }

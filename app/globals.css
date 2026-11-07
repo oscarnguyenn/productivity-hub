@@ -374,3 +374,11 @@
     box-shadow: none !important;
   }
 }
+
+.note-attachment { margin: 0.75rem 0; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 0.5rem; font-size: 0.875rem; }
+.note-attachment a { font-weight: 500; text-decoration: none; }
+.ProseMirror .tiptap-mathematics-render { cursor: pointer; border-radius: 0.25rem; padding: 0 0.15rem; }
+.ProseMirror .tiptap-mathematics-render:hover { background: rgba(120, 120, 120, 0.15); }
+.ProseMirror .tiptap-mathematics-render--editable { cursor: pointer; }
+.ProseMirror img.ProseMirror-selectednode { outline: 2px solid var(--ring, #6366f1); }
+
